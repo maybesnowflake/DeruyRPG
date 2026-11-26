@@ -3,6 +3,7 @@ package com.fsixel.deruyrpg.weapons.shield;
 import com.fsixel.deruyrpg.DeruyRPG;
 import com.fsixel.deruyrpg.api.SkillContext;
 import com.fsixel.deruyrpg.api.WeaponKit;
+import com.fsixel.deruyrpg.util.Cc;
 import com.fsixel.deruyrpg.util.Damage;
 import com.fsixel.deruyrpg.util.Fx;
 import com.fsixel.deruyrpg.util.Items;
@@ -27,6 +28,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityPotionEffectEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityResurrectEvent;
 import org.bukkit.event.entity.ProjectileHitEvent;
@@ -36,7 +38,12 @@ import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
+import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
+
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
 
 import java.util.Map;
 import java.util.UUID;
@@ -56,10 +63,11 @@ public final class ShieldKit implements WeaponKit, Listener {
 
     private static final String[] LORE = {
             "좌  방패 ↔ 불사의 토템 스왑",
-            "P  철벽(반사·넉백 면역) / 재생 + 1회 부활",
+            "P  철벽(반사·넉백 면역) / 재생(들고 있을 때) + 1회 부활",
             "우  막기 / 나에게 재생",
-            "⇧우  넉백+구속 / 아군 회복",
-            "F  성역"
+            "⇧우  방패 돌진(넉백+구속 III) / 아군 회복(3칸)",
+            "F  성역 (방패 결계·밀쳐내기)",
+            "피버  저항 III·흡수 IV·CC 무효"
     };
 
     // 수치
@@ -72,12 +80,34 @@ public final class ShieldKit implements WeaponKit, Listener {
     private static final float SELF_REGEN_MANA = 0.15f;
     private static final int HEAL_CD = 320;
     private static final float HEAL_MANA = 0.3f;
-    private static final double HEAL_RADIUS = 6.0;
+    private static final double HEAL_RADIUS = 3.0;
+    private static final int DASH_TICKS = 6;
+    private static final double DASH_SPEED = 0.55;
+    private static final double DASH_LENGTH = 3.0;
+    private static final double DASH_WIDTH = 1.0;
+    private static final int BASH_SLOW_TICKS = 50;
+
+    // 폼별 쿨다운 슬롯
+    static final String RIGHT_SHIELD = "우·방패";
+    static final String SHIFT_SHIELD = "⇧우·방패";
+    static final String RIGHT_TOTEM = "우·불토";
+    static final String SHIFT_TOTEM = "⇧우·불토";
+
+    private static final Set<PotionEffectType> CC_TYPES = Set.of(
+            PotionEffectType.SLOWNESS, PotionEffectType.LEVITATION, PotionEffectType.BLINDNESS,
+            PotionEffectType.DARKNESS, PotionEffectType.NAUSEA, PotionEffectType.WEAKNESS,
+            PotionEffectType.MINING_FATIGUE);
     private static final double HEAL_AMOUNT = 6.0;
     private static final float HEAL_ALLY_MANA = 0.1f;
 
     private final Map<UUID, Integer> lastSwap = new ConcurrentHashMap<>();
     private final Map<UUID, Sanctuary> sanctuaries = new ConcurrentHashMap<>();
+    /** 불토 폼이 건 재생 (불토를 손에서 놓으면 즉시 제거). */
+    private final Map<UUID, OwnedRegen> formRegen = new ConcurrentHashMap<>();
+    /** 피버(궁극기) 넉백·CC 면역 종료 틱. */
+    private final Map<UUID, Integer> feverGuardUntil = new ConcurrentHashMap<>();
+    private final Map<UUID, BukkitTask> dashes = new ConcurrentHashMap<>();
+    private BukkitTask regenWatcher;
 
     @Override
     public String id() {
@@ -102,6 +132,25 @@ public final class ShieldKit implements WeaponKit, Listener {
     @Override
     public boolean usesMana() {
         return true;
+    }
+
+    @Override
+    public String[] cooldownSlots(Player player) {
+        ItemStack item = player.getInventory().getItemInMainHand();
+        return isOurs(item) && isTotem(item)
+                ? new String[]{RIGHT_TOTEM, SHIFT_TOTEM}
+                : new String[]{SHIFT_SHIELD};
+    }
+
+    @Override
+    public String[] cooldownSlots() {
+        return new String[]{SHIFT_SHIELD, RIGHT_TOTEM, SHIFT_TOTEM};
+    }
+
+    @Override
+    public Component hudExtra(SkillContext ctx) {
+        if (!isTotem(ctx.item())) return Component.text("[방패]", NamedTextColor.BLUE);
+        return Component.text("[불토] 부활 " + (hasCharge(ctx.item()) ? "●" : "○"), NamedTextColor.GOLD);
     }
 
     // ------------------------------------------------------------------ 폼
@@ -137,6 +186,7 @@ public final class ShieldKit implements WeaponKit, Listener {
 
         boolean toTotem = !isTotem(cur);
         if (p.hasActiveItem()) p.clearActiveItem();
+        if (!toTotem) stripFormRegen(p);
         ItemStack next = cur.withType(toTotem ? Material.TOTEM_OF_UNDYING : Material.SHIELD);
         next.editMeta(m -> {
             PersistentDataContainer pdc = m.getPersistentDataContainer();
@@ -174,12 +224,87 @@ public final class ShieldKit implements WeaponKit, Listener {
     @Override
     public void onPassiveTick(SkillContext ctx) {
         Player p = ctx.player();
-        if (!isTotem(ctx.item())) return;
+        if (isFeverGuarded(p)) Cc.cleanse(p);
+        if (!isTotem(ctx.item())) {
+            stripFormRegen(p);
+            return;
+        }
         // 재생 I: 지속시간이 50틱 경계를 지나야 회복되므로 매번 덮어쓰지 않고 거의 끝났을 때만 갱신
         PotionEffect cur = p.getPotionEffect(PotionEffectType.REGENERATION);
-        if (cur == null || (cur.getAmplifier() == 0 && cur.getDuration() <= 10)) {
-            p.addPotionEffect(new PotionEffect(PotionEffectType.REGENERATION, 110, 0, true, false));
+        OwnedRegen mine = formRegen.get(p.getUniqueId());
+        boolean ours = mine != null && mine.matches(p);
+        if (cur == null || (ours && cur.getAmplifier() == 0 && cur.getDuration() <= 10)) {
+            grantFormRegen(p, 110, 0, true, false);
         }
+    }
+
+    // ------------------------------------------------------------------ 재생 추적
+
+    private void grantFormRegen(Player p, int duration, int amp, boolean ambient, boolean particles) {
+        OwnedRegen g = OwnedRegen.apply(p, duration, amp, ambient, particles);
+        if (g == null) return;
+        formRegen.put(p.getUniqueId(), g);
+        ensureRegenWatcher();
+    }
+
+    private void stripFormRegen(Player p) {
+        OwnedRegen g = formRegen.remove(p.getUniqueId());
+        if (g != null) g.strip(p);
+    }
+
+    /** 매 틱: 불토 폼을 주손에 들고 있지 않으면 우리가 건 재생 즉시 제거 (버리기·인벤 이동 포함). */
+    private void ensureRegenWatcher() {
+        if (regenWatcher != null && !regenWatcher.isCancelled()) return;
+        regenWatcher = Bukkit.getScheduler().runTaskTimer(DeruyRPG.get(), () -> {
+            Iterator<Map.Entry<UUID, OwnedRegen>> it = formRegen.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<UUID, OwnedRegen> en = it.next();
+                Player p = Bukkit.getPlayer(en.getKey());
+                OwnedRegen g = en.getValue();
+                if (p == null || !p.isOnline() || p.isDead() || g.expired()) {
+                    it.remove();
+                    continue;
+                }
+                ItemStack hand = p.getInventory().getItemInMainHand();
+                if (!(isOurs(hand) && isTotem(hand))) {
+                    g.strip(p);
+                    it.remove();
+                }
+            }
+            if (formRegen.isEmpty()) {
+                regenWatcher.cancel();
+                regenWatcher = null;
+            }
+        }, 1L, 1L);
+    }
+
+    // ------------------------------------------------------------------ 피버
+
+    private boolean isFeverGuarded(Player p) {
+        Integer end = feverGuardUntil.get(p.getUniqueId());
+        if (end == null) return false;
+        if (end > Bukkit.getCurrentTick()) return true;
+        feverGuardUntil.remove(p.getUniqueId());
+        return false;
+    }
+
+    /** 피버(15초, 폼 무관): 저항 III + 흡수 IV + 모든 CC 무효 + 넉백 면역. */
+    private void applyFever(SkillContext ctx) {
+        Player p = ctx.player();
+        int left = ctx.fever().feverRemaining(p);
+        if (left <= 0) return;
+        p.addPotionEffect(new PotionEffect(PotionEffectType.RESISTANCE, left, 2, false, true));
+        p.addPotionEffect(new PotionEffect(PotionEffectType.ABSORPTION, left, 3, false, true));
+        feverGuardUntil.put(p.getUniqueId(), Bukkit.getCurrentTick() + left);
+        Cc.setImmune(p, left);
+    }
+
+    /** 피버 중 CC 포션 차단. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPotion(EntityPotionEffectEvent e) {
+        if (!(e.getEntity() instanceof Player p) || e.getNewEffect() == null) return;
+        if (!CC_TYPES.contains(e.getNewEffect().getType())) return;
+        if (isFeverGuarded(p)) e.setCancelled(true);
     }
 
     /** 철벽: 막은 피해 일부 반사. */
@@ -221,6 +346,10 @@ public final class ShieldKit implements WeaponKit, Listener {
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onKnockback(EntityKnockbackEvent e) {
         if (!(e.getEntity() instanceof Player p)) return;
+        if (isFeverGuarded(p)) {
+            e.setCancelled(true);
+            return;
+        }
         Sanctuary s = sanctuaries.get(p.getUniqueId());
         if (s != null && s.isActive()) {
             e.setCancelled(true);
@@ -285,9 +414,9 @@ public final class ShieldKit implements WeaponKit, Listener {
         if (!isTotem(ctx.item())) return; // 방패 폼: 바닐라 막기 (주손 방패)
         Player p = ctx.player();
         ctx.cancelVanilla();
-        if (ctx.onCooldown(Slot.RIGHT) || !ctx.tryMana(SELF_REGEN_MANA)) return;
-        ctx.tryCooldown(Slot.RIGHT, SELF_REGEN_CD);
-        p.addPotionEffect(new PotionEffect(PotionEffectType.REGENERATION, 80, ctx.isFever() ? 2 : 1, false, true));
+        if (ctx.onCooldown(RIGHT_TOTEM) || !ctx.tryMana(SELF_REGEN_MANA)) return;
+        ctx.tryCooldown(RIGHT_TOTEM, SELF_REGEN_CD);
+        grantFormRegen(p, 80, ctx.isFever() ? 2 : 1, false, true);
         Location l = p.getLocation().add(0, 1, 0);
         l.getWorld().spawnParticle(Particle.HEART, l, 6, 0.4, 0.5, 0.4, 0);
         Fx.sound(l, Sound.BLOCK_AMETHYST_BLOCK_CHIME, 1f, 1.4f);
@@ -300,28 +429,68 @@ public final class ShieldKit implements WeaponKit, Listener {
         else shieldBash(ctx);
     }
 
-    /** 방패 폼 ⇧우: 전방 넉백 + 짧은 구속. */
+    /** 방패 폼 ⇧우: 약 3칸 돌진, 경로(폭 1 × 길이 3)의 적 넉백 + 구속 III. */
     private void shieldBash(SkillContext ctx) {
         Player p = ctx.player();
-        if (ctx.onCooldown(Slot.SHIFT_RIGHT) || !ctx.tryMana(BASH_MANA)) return;
-        ctx.tryCooldown(Slot.SHIFT_RIGHT, BASH_CD);
-        int slowAmp = ctx.isFever() ? 2 : 1;
-        for (LivingEntity e : Targets.frontBox(p, 3, 4, 2)) {
-            Targets.push(e, p.getLocation(), 1.3, 0.35);
-            e.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 40, slowAmp, false, true));
-        }
-        Location front = p.getLocation().add(p.getLocation().getDirection().setY(0).normalize().multiply(1.5)).add(0, 1, 0);
-        front.getWorld().spawnParticle(Particle.SWEEP_ATTACK, front, 3, 0.6, 0.3, 0.6, 0);
-        front.getWorld().spawnParticle(Particle.CLOUD, front, 15, 0.6, 0.4, 0.6, 0.05);
-        Fx.sound(front, Sound.ITEM_SHIELD_BLOCK, 1f, 0.7f);
-        Fx.sound(front, Sound.ENTITY_IRON_GOLEM_ATTACK, 0.8f, 1f);
+        if (ctx.onCooldown(SHIFT_SHIELD) || !ctx.tryMana(BASH_MANA)) return;
+        ctx.tryCooldown(SHIFT_SHIELD, BASH_CD);
+
+        UUID id = p.getUniqueId();
+        BukkitTask old = dashes.remove(id);
+        if (old != null) old.cancel();
+
+        Location start = p.getLocation();
+        Vector dir = start.getDirection().setY(0);
+        if (dir.lengthSquared() < 1e-6) dir = new Vector(0, 0, 1);
+        final Vector forward = dir.normalize();
+        final Vector right = new Vector(-forward.getZ(), 0, forward.getX());
+        Set<UUID> hit = new HashSet<>();
+
+        Fx.sound(start, Sound.ITEM_SHIELD_BLOCK, 1f, 0.7f);
+        Fx.sound(start, Sound.ENTITY_IRON_GOLEM_ATTACK, 0.8f, 1f);
+
+        BukkitTask[] holder = new BukkitTask[1];
+        int[] t = {0};
+        holder[0] = Bukkit.getScheduler().runTaskTimer(ctx.plugin(), () -> {
+            if (!p.isOnline() || p.isDead() || !p.getWorld().equals(start.getWorld()) || t[0]++ >= DASH_TICKS) {
+                holder[0].cancel();
+                dashes.remove(id, holder[0]);
+                return;
+            }
+            double vy = p.isOnGround() ? 0.0 : Math.min(p.getVelocity().getY(), 0.2);
+            p.setVelocity(forward.clone().multiply(DASH_SPEED).setY(vy));
+            p.setFallDistance(0);
+
+            Location now = p.getLocation();
+            double traveled = now.toVector().subtract(start.toVector()).dot(forward);
+            double reach = Math.min(DASH_LENGTH, Math.max(0, traveled) + 1.2);
+            for (LivingEntity e : Targets.enemiesAround(p, now, 3.0)) {
+                if (hit.contains(e.getUniqueId())) continue;
+                Vector rel = e.getLocation().toVector().subtract(start.toVector());
+                double f = rel.dot(forward);
+                double side = Math.abs(rel.dot(right));
+                double halfW = DASH_WIDTH / 2.0 + e.getWidth() / 2.0;
+                double y = rel.getY();
+                if (f < -0.3 || f > reach || side > halfW || y < -1 || y > 2.5) continue;
+                hit.add(e.getUniqueId());
+                e.setVelocity(forward.clone().multiply(1.3).setY(0.4));
+                e.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, BASH_SLOW_TICKS, 2, false, true));
+                Location el = e.getLocation().add(0, e.getHeight() / 2, 0);
+                el.getWorld().spawnParticle(Particle.CRIT, el, 10, 0.3, 0.3, 0.3, 0.2);
+                Fx.sound(el, Sound.ENTITY_PLAYER_ATTACK_KNOCKBACK, 1f, 0.8f);
+            }
+            Location fx = now.clone().add(forward.clone().multiply(0.8)).add(0, 1, 0);
+            fx.getWorld().spawnParticle(Particle.CLOUD, fx, 4, 0.3, 0.3, 0.3, 0.02);
+            fx.getWorld().spawnParticle(Particle.ENCHANTED_HIT, fx, 4, 0.3, 0.4, 0.3, 0.05);
+        }, 0L, 1L);
+        dashes.put(id, holder[0]);
     }
 
-    /** 불토 폼 ⇧우: 아군(자신 포함) 6HP 즉시 회복 + 마나 +0.1. */
+    /** 불토 폼 ⇧우: 반경 3칸 아군(자신 포함) 6HP 즉시 회복 + 마나 +0.1. */
     private void groupHeal(SkillContext ctx) {
         Player p = ctx.player();
-        if (ctx.onCooldown(Slot.SHIFT_RIGHT) || !ctx.tryMana(HEAL_MANA)) return;
-        ctx.tryCooldown(Slot.SHIFT_RIGHT, HEAL_CD);
+        if (ctx.onCooldown(SHIFT_TOTEM) || !ctx.tryMana(HEAL_MANA)) return;
+        ctx.tryCooldown(SHIFT_TOTEM, HEAL_CD);
         for (Player ally : Targets.alliesAround(p, p.getLocation(), HEAL_RADIUS)) {
             if (ally.isDead()) continue;
             AttributeInstance max = ally.getAttribute(Attribute.MAX_HEALTH);
@@ -357,6 +526,7 @@ public final class ShieldKit implements WeaponKit, Listener {
         holder[0] = s;
         sanctuaries.put(id, s);
         s.start(ctx.plugin());
+        applyFever(ctx);
     }
 
     /** 돔 안 아군 치명 피해 → 취소하고 부활. */
@@ -413,6 +583,9 @@ public final class ShieldKit implements WeaponKit, Listener {
     @Override
     public void onUnequip(Player player) {
         lastSwap.remove(player.getUniqueId());
+        stripFormRegen(player);
+        BukkitTask dash = dashes.remove(player.getUniqueId());
+        if (dash != null) dash.cancel();
         Sanctuary s = sanctuaries.remove(player.getUniqueId());
         if (s != null) s.end();
         Sanctuary.cleanup(player);
