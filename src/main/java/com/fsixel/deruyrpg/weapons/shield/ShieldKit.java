@@ -3,6 +3,7 @@ package com.fsixel.deruyrpg.weapons.shield;
 import com.fsixel.deruyrpg.DeruyRPG;
 import com.fsixel.deruyrpg.api.SkillContext;
 import com.fsixel.deruyrpg.api.WeaponKit;
+import com.fsixel.deruyrpg.core.HudTask;
 import com.fsixel.deruyrpg.util.Cc;
 import com.fsixel.deruyrpg.util.Damage;
 import com.fsixel.deruyrpg.util.Fx;
@@ -32,6 +33,7 @@ import org.bukkit.event.entity.EntityPotionEffectEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityResurrectEvent;
 import org.bukkit.event.entity.ProjectileHitEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataContainer;
@@ -106,6 +108,10 @@ public final class ShieldKit implements WeaponKit, Listener {
     private final Map<UUID, OwnedRegen> formRegen = new ConcurrentHashMap<>();
     /** 피버(궁극기) 넉백·CC 면역 종료 틱. */
     private final Map<UUID, Integer> feverGuardUntil = new ConcurrentHashMap<>();
+    /** 피버 버프가 지금 걸려 있는 플레이어 (무기를 들고 있는 동안만). */
+    private final Set<UUID> feverApplied = ConcurrentHashMap.newKeySet();
+    /** 무기를 놓을 때 남아 있던 흡수량 — 다시 들 때 흡수 IV 를 새로 채우지 않도록. */
+    private final Map<UUID, Double> feverAbsorbStash = new ConcurrentHashMap<>();
     private final Map<UUID, BukkitTask> dashes = new ConcurrentHashMap<>();
     private BukkitTask regenWatcher;
 
@@ -200,12 +206,12 @@ public final class ShieldKit implements WeaponKit, Listener {
         if (toTotem) {
             Fx.sound(l, Sound.ITEM_ARMOR_EQUIP_GOLD, 1f, 1.2f);
             l.getWorld().spawnParticle(Particle.TOTEM_OF_UNDYING, l, 10, 0.3, 0.4, 0.3, 0.05);
-            p.sendActionBar(Component.text("불사의 토템 폼 — 부활 " + (hasCharge(next) ? "충전됨" : "소모됨"),
-                    NamedTextColor.GOLD));
+            HudTask.flash(p, Component.text("불사의 토템 폼 — 부활 " + (hasCharge(next) ? "충전됨" : "소모됨"),
+                    NamedTextColor.GOLD), 30);
         } else {
             Fx.sound(l, Sound.ITEM_ARMOR_EQUIP_IRON, 1f, 1f);
             l.getWorld().spawnParticle(Particle.ENCHANTED_HIT, l, 10, 0.3, 0.4, 0.3, 0.05);
-            p.sendActionBar(Component.text("방패 폼", NamedTextColor.BLUE));
+            HudTask.flash(p, Component.text("방패 폼", NamedTextColor.BLUE), 30);
         }
     }
 
@@ -224,6 +230,13 @@ public final class ShieldKit implements WeaponKit, Listener {
     @Override
     public void onPassiveTick(SkillContext ctx) {
         Player p = ctx.player();
+        // 피버 버프: 무기를 놓으면 해제되고, 피버가 남아 있을 때 다시 들면 재적용
+        if (ctx.isFever()) {
+            if (!feverApplied.contains(p.getUniqueId())) applyFeverBuffs(p, false);
+        } else if (feverApplied.remove(p.getUniqueId())) {
+            feverGuardUntil.remove(p.getUniqueId());
+            feverAbsorbStash.remove(p.getUniqueId());
+        }
         if (isFeverGuarded(p)) Cc.cleanse(p);
         if (!isTotem(ctx.item())) {
             stripFormRegen(p);
@@ -288,15 +301,39 @@ public final class ShieldKit implements WeaponKit, Listener {
         return false;
     }
 
-    /** 피버(15초, 폼 무관): 저항 III + 흡수 IV + 모든 CC 무효 + 넉백 면역. */
-    private void applyFever(SkillContext ctx) {
-        Player p = ctx.player();
-        int left = ctx.fever().feverRemaining(p);
-        if (left <= 0) return;
+    /** 피버(15초, 폼 무관, 방패를 들고 있을 때만): 저항 III + 흡수 IV + 모든 CC 무효 + 넉백 면역. */
+    private void applyFeverBuffs(Player p, boolean fresh) {
+        UUID id = p.getUniqueId();
+        int left = DeruyRPG.get().fever().feverRemaining(p);
+        if (left <= 0 || !DeruyRPG.get().fever().isFever(p, ID)) return;
+        Double stash = feverAbsorbStash.remove(id);
         p.addPotionEffect(new PotionEffect(PotionEffectType.RESISTANCE, left, 2, false, true));
         p.addPotionEffect(new PotionEffect(PotionEffectType.ABSORPTION, left, 3, false, true));
-        feverGuardUntil.put(p.getUniqueId(), Bukkit.getCurrentTick() + left);
+        if (!fresh && stash != null) p.setAbsorptionAmount(Math.min(p.getAbsorptionAmount(), stash));
+        feverGuardUntil.put(id, Bukkit.getCurrentTick() + left);
         Cc.setImmune(p, left);
+        feverApplied.add(id);
+    }
+
+    /** 무기를 놓으면 피버 버프 해제 (피버 자체는 남아 있으면 다시 들 때 재적용). 여러 번 불려도 안전. */
+    private void stripFeverBuffs(Player p) {
+        UUID id = p.getUniqueId();
+        feverGuardUntil.remove(id);
+        if (!feverApplied.remove(id)) return;
+        Cc.clearImmune(p);
+        double absorb = p.getAbsorptionAmount();
+        removeIfAmp(p, PotionEffectType.RESISTANCE, 2);
+        removeIfAmp(p, PotionEffectType.ABSORPTION, 3);
+        if (DeruyRPG.get().fever().isFever(p, ID)) feverAbsorbStash.put(id, absorb);
+        else feverAbsorbStash.remove(id);
+        // 피버 포션이 덮고 있던 성역 버프(저항 I·흡수 II)는 남은 시간만큼 복구
+        Sanctuary s = sanctuaries.get(id);
+        if (s != null && s.isActive()) s.restoreOwnerBuffs(p, absorb);
+    }
+
+    private static void removeIfAmp(Player p, PotionEffectType type, int amp) {
+        PotionEffect cur = p.getPotionEffect(type);
+        if (cur != null && cur.getAmplifier() == amp) p.removePotionEffect(type);
     }
 
     /** 피버 중 CC 포션 차단. */
@@ -310,6 +347,7 @@ public final class ShieldKit implements WeaponKit, Listener {
     /** 철벽: 막은 피해 일부 반사. */
     @Override
     public void onDamaged(SkillContext ctx, EntityDamageEvent event) {
+        if (Damage.isProbe()) return;
         Player p = ctx.player();
         if (isTotem(ctx.item()) || Damage.isSkillDamage()) return;
         if (!(event instanceof EntityDamageByEntityEvent ed)) return;
@@ -376,7 +414,7 @@ public final class ShieldKit implements WeaponKit, Listener {
             keep.setAmount(1);
             setCharge(keep, false);
             restoreAfterResurrect(p, hand, keep);
-            p.sendActionBar(Component.text("불사의 토템 발동! (성역으로 재충전)", NamedTextColor.GOLD));
+            HudTask.flash(p, Component.text("불사의 토템 발동! (성역으로 재충전)", NamedTextColor.GOLD), 40);
             return;
         }
 
@@ -473,6 +511,7 @@ public final class ShieldKit implements WeaponKit, Listener {
                 double y = rel.getY();
                 if (f < -0.3 || f > reach || side > halfW || y < -1 || y > 2.5) continue;
                 hit.add(e.getUniqueId());
+                if (!Damage.canHarm(p, e)) continue; // PvP 꺼짐·보호구역
                 e.setVelocity(forward.clone().multiply(1.3).setY(0.4));
                 e.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, BASH_SLOW_TICKS, 2, false, true));
                 Location el = e.getLocation().add(0, e.getHeight() / 2, 0);
@@ -522,16 +561,17 @@ public final class ShieldKit implements WeaponKit, Listener {
 
         UUID id = p.getUniqueId();
         Sanctuary[] holder = new Sanctuary[1];
-        Sanctuary s = new Sanctuary(p, ctx::isFever, () -> sanctuaries.remove(id, holder[0]));
+        Sanctuary s = new Sanctuary(p, () -> sanctuaries.remove(id, holder[0]));
         holder[0] = s;
         sanctuaries.put(id, s);
         s.start(ctx.plugin());
-        applyFever(ctx);
+        applyFeverBuffs(p, true);
     }
 
     /** 돔 안 아군 치명 피해 → 취소하고 부활. */
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onLethal(EntityDamageEvent e) {
+        if (Damage.isProbe()) return;
         if (sanctuaries.isEmpty() || !(e.getEntity() instanceof Player victim)) return;
         EntityDamageEvent.DamageCause c = e.getCause();
         if (c == EntityDamageEvent.DamageCause.VOID || c == EntityDamageEvent.DamageCause.KILL
@@ -580,14 +620,25 @@ public final class ShieldKit implements WeaponKit, Listener {
 
     // ------------------------------------------------------------------ 정리
 
+    /** 무기 해제(슬롯 변경·버리기·사망·접속 종료 등). 성역(궁극기)은 끊지 않음. 여러 번 불려도 안전. */
     @Override
     public void onUnequip(Player player) {
-        lastSwap.remove(player.getUniqueId());
+        UUID id = player.getUniqueId();
+        lastSwap.remove(id);
         stripFormRegen(player);
-        BukkitTask dash = dashes.remove(player.getUniqueId());
+        BukkitTask dash = dashes.remove(id);
         if (dash != null) dash.cancel();
-        Sanctuary s = sanctuaries.remove(player.getUniqueId());
+        stripFeverBuffs(player);
+        Sanctuary s = sanctuaries.get(id);
+        if (s == null || !s.isActive()) Sanctuary.cleanup(player);
+    }
+
+    /** 접속 종료: 성역 즉시 정리 (사망은 성역 자체 타이머가 감지해 종료). */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onQuit(PlayerQuitEvent e) {
+        Player p = e.getPlayer();
+        Sanctuary s = sanctuaries.remove(p.getUniqueId());
         if (s != null) s.end();
-        Sanctuary.cleanup(player);
+        Sanctuary.cleanup(p);
     }
 }
