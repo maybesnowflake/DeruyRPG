@@ -1,0 +1,17 @@
+name: DeruyRPG
+version: '${project.version}'
+main: com.fsixel.deruyrpg.DeruyRPG
+api-version: '26.2'
+description: 바닐라 무기 기반 RPG 스킬 (Fsixel)
+author: Fsixel
+
+commands:
+  rpg:
+    description: DeruyRPG 무기 지급·테스트
+    usage: /rpg give <무기|all> [플레이어]
+    permission: deruyrpg.admin
+
+permissions:
+  deruyrpg.admin:
+    description: /rpg 명령어
+    default: op

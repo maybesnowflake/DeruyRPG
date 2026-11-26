@@ -1,0 +1,111 @@
+package com.fsixel.deruyrpg.command;
+
+import com.fsixel.deruyrpg.DeruyRPG;
+import com.fsixel.deruyrpg.api.WeaponKit;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
+import org.bukkit.Bukkit;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandSender;
+import org.bukkit.command.TabExecutor;
+import org.bukkit.entity.Player;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * /rpg give <무기|all> [플레이어]
+ * /rpg fever [플레이어]      — 게이지 가득 (테스트용)
+ * /rpg mana [플레이어]       — 마나 가득
+ * /rpg reset [플레이어]      — 쿨다운 초기화
+ * /rpg list
+ */
+public final class RpgCommand implements TabExecutor {
+
+    private final DeruyRPG plugin;
+
+    public RpgCommand(DeruyRPG plugin) {
+        this.plugin = plugin;
+    }
+
+    @Override
+    public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label,
+                             @NotNull String[] args) {
+        if (args.length == 0) {
+            sender.sendMessage(Component.text("/rpg give <무기|all> [플레이어] · fever · mana · reset · list", NamedTextColor.YELLOW));
+            return true;
+        }
+        switch (args[0].toLowerCase()) {
+            case "list" -> {
+                for (WeaponKit k : plugin.kits().all()) {
+                    sender.sendMessage(Component.text("- " + k.id() + " (" + k.displayName() + ")", NamedTextColor.GRAY));
+                }
+            }
+            case "give" -> {
+                if (args.length < 2) return usage(sender);
+                Player target = target(sender, args, 2);
+                if (target == null) return true;
+                if (args[1].equalsIgnoreCase("all")) {
+                    for (WeaponKit k : plugin.kits().all()) target.getInventory().addItem(k.createItem());
+                } else {
+                    WeaponKit k = plugin.kits().get(args[1].toLowerCase());
+                    if (k == null) {
+                        sender.sendMessage(Component.text("없는 무기: " + args[1], NamedTextColor.RED));
+                        return true;
+                    }
+                    target.getInventory().addItem(k.createItem());
+                }
+                sender.sendMessage(Component.text(target.getName() + "에게 지급", NamedTextColor.GREEN));
+            }
+            case "fever" -> {
+                Player target = target(sender, args, 1);
+                if (target != null) plugin.fever().set(target, 100);
+            }
+            case "mana" -> {
+                Player target = target(sender, args, 1);
+                if (target != null) plugin.mana().set(target, 1f);
+            }
+            case "reset" -> {
+                Player target = target(sender, args, 1);
+                if (target != null) plugin.cooldowns().clear(target);
+            }
+            default -> {
+                return usage(sender);
+            }
+        }
+        return true;
+    }
+
+    private boolean usage(CommandSender sender) {
+        sender.sendMessage(Component.text("사용법: /rpg give <무기|all> [플레이어]", NamedTextColor.RED));
+        return true;
+    }
+
+    private Player target(CommandSender sender, String[] args, int index) {
+        if (args.length > index) {
+            Player p = Bukkit.getPlayerExact(args[index]);
+            if (p == null) sender.sendMessage(Component.text("플레이어 없음: " + args[index], NamedTextColor.RED));
+            return p;
+        }
+        if (sender instanceof Player p) return p;
+        sender.sendMessage(Component.text("플레이어를 지정하세요", NamedTextColor.RED));
+        return null;
+    }
+
+    @Override
+    public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label,
+                                      @NotNull String[] args) {
+        List<String> out = new ArrayList<>();
+        if (args.length == 1) {
+            for (String s : List.of("give", "fever", "mana", "reset", "list")) if (s.startsWith(args[0].toLowerCase())) out.add(s);
+        } else if (args.length == 2 && args[0].equalsIgnoreCase("give")) {
+            out.add("all");
+            for (WeaponKit k : plugin.kits().all()) out.add(k.id());
+            out.removeIf(s -> !s.startsWith(args[1].toLowerCase()));
+        } else {
+            return null; // 플레이어 이름
+        }
+        return out;
+    }
+}

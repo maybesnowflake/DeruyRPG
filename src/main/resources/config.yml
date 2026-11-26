@@ -1,0 +1,13 @@
+# DeruyRPG 공통 설정
+
+fever:
+  # 무기로 때릴 때 게이지 증가량 (최대 100)
+  gain-on-hit: 5.0
+  # 피격 시 게이지 증가량
+  gain-on-hurt: 2.0
+  # 피버 중 스킬 쿨다운 배율 (0.5 = 절반)
+  cooldown-multiplier: 0.5
+
+mana:
+  # 초당 마나 회복 (1.0 = 가득)
+  regen-per-second: 0.05
