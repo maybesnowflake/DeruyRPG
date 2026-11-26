@@ -55,6 +55,14 @@ public final class HudTask extends BukkitRunnable {
         if (kit.usesMana()) plugin.mana().restoreDisplay(p);
     }
 
+    /**
+     * 입력(스킬·평타·F)으로 무기가 쓰였을 때 코어가 호출 — 5틱 HUD 검사 사이에 잠깐 든 무기도 해제 추적에 잡히게.
+     */
+    public void touch(Player p, String kitId) {
+        String prev = lastKit.put(p.getUniqueId(), kitId);
+        if (prev != null && !prev.equals(kitId)) unequip(p, prev);
+    }
+
     public void forget(Player p) {
         String prev = lastKit.remove(p.getUniqueId());
         if (prev != null) unequip(p, prev);
@@ -126,6 +134,7 @@ public final class HudTask extends BukkitRunnable {
             }
         } else {
             int filled = (int) Math.floor(fever.get(p) / fever.max() * BAR_CELLS);
+            filled = Math.max(0, Math.min(BAR_CELLS, filled));
             NamedTextColor color = fever.isFull(p) ? NamedTextColor.GOLD : NamedTextColor.YELLOW;
             b.append(Component.text("F ", NamedTextColor.WHITE));
             b.append(Component.text("▮".repeat(filled), color));

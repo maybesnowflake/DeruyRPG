@@ -44,6 +44,7 @@ public final class InputListener implements Listener {
     }
 
     private SkillContext ctx(Player p, ItemStack item, WeaponKit kit, Cancellable event) {
+        plugin.hud().touch(p, kit.id());
         return new SkillContext(plugin, p, item, kit, event);
     }
 

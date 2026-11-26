@@ -139,6 +139,7 @@ public final class TrainingDummy implements Listener {
             t.setShadowed(true);
             t.setPersistent(false);
             t.setSeeThrough(true);
+            com.fsixel.deruyrpg.util.Targets.markSummon(t); // /reload 시 코어가 제거
         });
         // 위로 떠오르다 사라짐
         new org.bukkit.scheduler.BukkitRunnable() {

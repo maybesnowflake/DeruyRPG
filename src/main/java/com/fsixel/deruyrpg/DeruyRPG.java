@@ -92,6 +92,15 @@ public final class DeruyRPG extends JavaPlugin {
                 }
             }
         }
+        if (kits != null) {
+            for (com.fsixel.deruyrpg.api.WeaponKit k : kits.all()) {
+                try {
+                    k.onPluginDisable();
+                } catch (Throwable t) {
+                    getLogger().warning("[" + k.id() + "] 종료 정리 오류: " + t);
+                }
+            }
+        }
         com.fsixel.deruyrpg.util.Cc.unstunAll();
         int removed = 0;
         for (org.bukkit.World w : getServer().getWorlds()) {

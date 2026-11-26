@@ -75,6 +75,12 @@ public interface WeaponKit {
         return new String[]{Slot.RIGHT, Slot.SHIFT_RIGHT};
     }
 
+    /**
+     * 플러그인 종료(/reload·서버 종료) 직전 1회 호출. 진행 중인 궁극기·장판 등이 플레이어에게 남긴
+     * attribute modifier·포션·상태를 전부 되돌릴 것 (태스크는 이후 자동 취소됨).
+     */
+    default void onPluginDisable() {}
+
     /** 무기가 손에서 빠질 때 정리용 (소환물 제거 등). */
     default void onUnequip(Player player) {}
 

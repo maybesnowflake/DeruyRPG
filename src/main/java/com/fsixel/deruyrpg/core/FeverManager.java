@@ -47,7 +47,7 @@ public final class FeverManager {
     }
 
     public double get(Player p) {
-        return gauge.getOrDefault(p.getUniqueId(), 0.0);
+        return Math.min(max, gauge.getOrDefault(p.getUniqueId(), 0.0));
     }
 
     public boolean isFull(Player p) {

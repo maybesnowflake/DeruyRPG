@@ -49,7 +49,9 @@ public final class Damage {
 
     /** 코어가 근접 평타 직후 호출 (무적시간 보정용). */
     public static void recordMelee(LivingEntity target) {
-        lastMelee.put(target.getUniqueId(), Bukkit.getCurrentTick());
+        int now = Bukkit.getCurrentTick();
+        lastMelee.put(target.getUniqueId(), now);
+        if (lastMelee.size() > 128) lastMelee.values().removeIf(t -> now - t > 20); // 만료 기록 정리
     }
 
     public static void forget(UUID id) {
