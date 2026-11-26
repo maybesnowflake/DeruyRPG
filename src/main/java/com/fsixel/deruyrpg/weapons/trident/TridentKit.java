@@ -7,6 +7,7 @@ import com.fsixel.deruyrpg.util.Damage;
 import com.fsixel.deruyrpg.util.Fx;
 import com.fsixel.deruyrpg.util.Items;
 import com.fsixel.deruyrpg.util.Targets;
+import com.destroystokyo.paper.event.player.PlayerLaunchProjectileEvent;
 import io.papermc.paper.datacomponent.DataComponentTypes;
 import io.papermc.paper.datacomponent.item.AttackRange;
 import io.papermc.paper.datacomponent.item.SwingAnimation;
@@ -53,15 +54,17 @@ import java.util.concurrent.ThreadLocalRandom;
  * 삼지창 — 스킬 명세: docs/SKILLS.md 의 "삼지창" 항목.
  *
  * P  물의 가호   : 나/적이 물·비에 닿아 있으면 근접(+투척) 추가 피해, 물속 공격 속도 증가, 물보라.
- * 우 투척/급류   : 물·비(궁극기 비 포함) 속이면 플러그인 급류 IV(인챈트 무관), 밖이면 시선 방향 직진 투척.
+ * 우 투척/급류   : 바닐라처럼 꾹 눌러 차징(10틱+) 후 떼면 — 물·비(궁극기 비 포함) 속이면 투척 대신 급류 IV(인챈트 무관),
+ *                  밖이면 시선 방향 직진 투척. 차징이 덜 되면 아무 일도 없음(바닐라).
  * 좌 찌르기      : 사거리 4칸, 창 찌르기 모션(SWING_ANIMATION=STAB). 비 속이면 물살 찌르기(전방 6칸 관통 물줄기).
- * ⇧우 물기둥     : 바라보는 블록(최대 20칸)에 8칸 물기둥 → 범위 적 띄우기 + 피해.
+ * ⇧우 물기둥     : 바라보는 블록(최대 20칸)에 8칸 물기둥 → 범위 적 띄우기 + 피해. 쿨 6초.
  * F  뇌우+비 소환 : 피버(15초) 동안 반경 5.5칸 비 + 범위 내 모든 적 초당 3회 번개 피해. 나는 항상 젖은 상태.
  */
 public final class TridentKit implements WeaponKit, Listener {
 
     // ---- 수치 ----
     private static final double REACH_BONUS = 1.0;          // 기본 3 → 4칸
+    private static final int STAB_DURATION = 8;             // 찌르기 모션 길이(틱)
     private static final double WET_BONUS = 3.0;            // 물의 가호 근접 추가 피해
     private static final double WATER_ATTACK_SPEED = 0.5;   // 물속 공격 속도 +0.5 (1.1 → 1.6)
 
@@ -70,11 +73,11 @@ public final class TridentKit implements WeaponKit, Listener {
     private static final double STREAM_WIDTH = 1.0;
     private static final double STREAM_DAMAGE = 4.0;
 
-    private static final int COLUMN_COOLDOWN = 14;          // 물기둥 0.7초
+    private static final int COLUMN_COOLDOWN = 120;         // 물기둥 6초
     private static final double COLUMN_MAX_DISTANCE = 20.0; // 바라보는 블록 최대 거리
     private static final double COLUMN_RADIUS = 2.0;
     private static final double COLUMN_HEIGHT = 8.0;
-    private static final double COLUMN_DAMAGE = 4.0;
+    private static final double COLUMN_DAMAGE = 5.0;        // 피버 7
     private static final int COLUMN_TICKS = 30;
 
     private static final int RIPTIDE_COOLDOWN = 6;          // 급류 0.3초
@@ -95,6 +98,8 @@ public final class TridentKit implements WeaponKit, Listener {
     private final Map<UUID, BukkitTask> storms = new ConcurrentHashMap<>();
     private final Map<UUID, BukkitTask> riptides = new ConcurrentHashMap<>();
     private final Set<UUID> waterSpeed = ConcurrentHashMap.newKeySet();
+    /** 같은 틱에 급류 중복 발동 방지 (PlayerLaunchProjectileEvent + ProjectileLaunchEvent). */
+    private final Map<UUID, Integer> riptideHandled = new ConcurrentHashMap<>();
     private BukkitTask cleanupTask;
 
     @Override
@@ -111,9 +116,9 @@ public final class TridentKit implements WeaponKit, Listener {
     public ItemStack createItem() {
         ItemStack item = Items.weapon(Material.TRIDENT, id(), "삼지창", NamedTextColor.AQUA,
                 "P  물의 가호 (물·비에 젖으면 추가 피해)",
-                "우  투척 (물·비 속: 급류 IV)",
+                "우  투척 (물·비 속: 꾹 눌렀다 떼면 급류 IV)",
                 "좌  찌르기 4칸 (비 속: 물살 찌르기)",
-                "⇧우  물기둥 (바라보는 곳, 20칸)",
+                "⇧우  물기둥 (바라보는 곳, 20칸 / 쿨 6초)",
                 "F  뇌우 + 비 소환 (반경 5.5칸)");
         // 아이템 modifier 를 하나라도 넣으면 바닐라 기본값이 사라지므로 삼지창 기본 공격력·속도를 다시 넣는다.
         item.editMeta(meta -> {
@@ -126,14 +131,25 @@ public final class TridentKit implements WeaponKit, Listener {
             meta.addAttributeModifier(Attribute.ENTITY_INTERACTION_RANGE, new AttributeModifier(
                     REACH_KEY, REACH_BONUS, AttributeModifier.Operation.ADD_NUMBER, EquipmentSlotGroup.MAINHAND));
         });
-        // 창(spear)처럼 앞으로 찌르는 공격 모션 + 공격 사거리 4칸.
+        applyStabComponents(item);
+        return item;
+    }
+
+    /** 창(spear)처럼 앞으로 찌르는 공격 모션(SWING_ANIMATION=STAB) + 공격 사거리 4칸. */
+    private static void applyStabComponents(ItemStack item) {
         item.setData(DataComponentTypes.SWING_ANIMATION,
-                SwingAnimation.swingAnimation().type(SwingAnimation.Animation.STAB).duration(8).build());
+                SwingAnimation.swingAnimation().type(SwingAnimation.Animation.STAB).duration(STAB_DURATION).build());
         item.setData(DataComponentTypes.ATTACK_RANGE, AttackRange.attackRange()
                 .minReach(0f).maxReach(3f + (float) REACH_BONUS)
                 .minCreativeReach(0f).maxCreativeReach(5f)
                 .hitboxMargin(0.3f).mobFactor(1f).build());
-        return item;
+    }
+
+    /** 이전 버전에서 지급된 삼지창엔 컴포넌트가 없으므로 들고 있을 때 붙여준다. */
+    private static boolean needsStabMigration(ItemStack item) {
+        SwingAnimation swing = item.getData(DataComponentTypes.SWING_ANIMATION);
+        return swing == null || swing.type() != SwingAnimation.Animation.STAB
+                || !item.hasData(DataComponentTypes.ATTACK_RANGE);
     }
 
     @Override
@@ -183,6 +199,13 @@ public final class TridentKit implements WeaponKit, Listener {
     @Override
     public void onPassiveTick(SkillContext ctx) {
         Player p = ctx.player();
+        // 구버전 아이템 마이그레이션 (차징 중엔 아이템을 바꾸면 사용이 끊기므로 건너뜀)
+        ItemStack hand = p.getInventory().getItemInMainHand();
+        if (!p.hasActiveItem() && isTrident(hand) && needsStabMigration(hand)) {
+            applyStabComponents(hand);
+            p.getInventory().setItemInMainHand(hand);
+        }
+
         boolean underwater = p.isInWaterOrBubbleColumn();
         if (underwater) addWaterSpeed(p);
         else removeWaterSpeed(p);
@@ -325,13 +348,25 @@ public final class TridentKit implements WeaponKit, Listener {
     }
 
     /**
-     * 물·비 속이면 투척 대신 급류 IV (인챈트 무관, 플러그인 구현). 밖이면 바닐라 투척(직진 보정은 onLaunch).
+     * 우클릭은 바닐라 투척 차징을 그대로 둔다 (onRightClick 오버라이드 안 함).
+     * 차징(10틱+) 후 손을 떼는 순간 바닐라가 투척하려 할 때 PlayerLaunchProjectileEvent 가 오므로,
+     * 그때 물·비 속이면 투척을 취소하고 급류 IV 발동. 10틱 미만이면 바닐라가 아무것도 안 하므로 이벤트도 없음.
      */
-    @Override
-    public void onRightClick(SkillContext ctx) {
-        Player p = ctx.player();
-        if (!canRiptide(p)) return; // 바닐라 투척
-        ctx.cancelVanilla();
+    @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+    public void onPlayerThrow(PlayerLaunchProjectileEvent e) {
+        if (!(e.getProjectile() instanceof Trident)) return;
+        Player p = e.getPlayer();
+        ItemStack item = isTrident(e.getItemStack()) ? e.getItemStack() : p.getInventory().getItemInMainHand();
+        if (!isTrident(item)) return;
+        if (!canRiptide(p)) return; // 물 밖: 바닐라 투척 (직진 보정은 onLaunch)
+        e.setCancelled(true);       // 투척 취소 → 아이템은 손에 남음
+        riptideHandled.put(p.getUniqueId(), Bukkit.getCurrentTick());
+        tryRiptide(p, item, e);
+    }
+
+    /** 쿨이 끝났으면 급류. 쿨 중이면 투척만 막고 아무것도 안 함. */
+    private void tryRiptide(Player p, ItemStack item, org.bukkit.event.Cancellable event) {
+        SkillContext ctx = new SkillContext(DeruyRPG.get(), p, item, this, event);
         if (!ctx.tryCooldown(Slot.RIGHT, RIPTIDE_COOLDOWN)) return;
         riptide(ctx);
     }
@@ -411,11 +446,17 @@ public final class TridentKit implements WeaponKit, Listener {
         if (p != null && p.isOnline()) p.setRiptiding(false);
     }
 
-    /** 투척은 탄퍼짐 없이 시선 방향 직진. */
+    /** 투척은 탄퍼짐 없이 시선 방향 직진. (PlayerLaunchProjectileEvent 가 안 온 경우 급류 예비 처리) */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onLaunch(ProjectileLaunchEvent e) {
         if (!(e.getEntity() instanceof Trident t) || !isTrident(t.getItemStack())) return;
         if (!(t.getShooter() instanceof Player p)) return;
+        if (canRiptide(p)) {
+            e.setCancelled(true);
+            Integer handled = riptideHandled.get(p.getUniqueId());
+            if (handled == null || handled != Bukkit.getCurrentTick()) tryRiptide(p, t.getItemStack(), e);
+            return;
+        }
         double speed = t.getVelocity().length();
         t.setVelocity(p.getEyeLocation().getDirection().normalize().multiply(speed));
     }
@@ -431,7 +472,7 @@ public final class TridentKit implements WeaponKit, Listener {
         Player p = ctx.player();
         boolean fever = ctx.isFever();
         double radius = fever ? COLUMN_RADIUS + 0.75 : COLUMN_RADIUS;
-        double dmg = fever ? COLUMN_DAMAGE + 1.5 : COLUMN_DAMAGE;
+        double dmg = fever ? COLUMN_DAMAGE + 2 : COLUMN_DAMAGE;
         double lift = fever ? 1.35 : 1.2;
 
         Location base = columnBase(p);
@@ -630,6 +671,7 @@ public final class TridentKit implements WeaponKit, Listener {
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         endRiptide(e.getPlayer().getUniqueId(), null);
+        riptideHandled.remove(e.getPlayer().getUniqueId());
         removeWaterSpeed(e.getPlayer());
         stopStorm(e.getPlayer().getUniqueId());
     }
