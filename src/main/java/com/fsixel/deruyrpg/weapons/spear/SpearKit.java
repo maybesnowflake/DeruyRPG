@@ -64,7 +64,7 @@ public final class SpearKit implements WeaponKit {
     private static final int JAB_COUNT = 5;
     private static final int JAB_INTERVAL = 3;
     private static final double JAB_DAMAGE = 2.0;
-    private static final double JAB_LENGTH = 5.5;
+    private static final double JAB_LENGTH = 7.5;
     private static final int JAB_COOLDOWN = 100;
 
     // ⇧우 큰 창
@@ -271,7 +271,7 @@ public final class SpearKit implements WeaponKit {
         p.swingMainHand();
         Location eye = p.getEyeLocation();
         Vector dir = eye.getDirection();
-        miniSpears(p, eye.clone().subtract(0, 0.25, 0), dir, JAB_LENGTH - 1.5, 3, n);
+        miniSpears(p, eye.clone().subtract(0, 0.25, 0), dir, JAB_LENGTH - 1.2, 3, n); // 창끝이 약 7.5칸까지
         Fx.sound(eye, Sound.ITEM_SPEAR_ATTACK, 0.7f, 1.3f + n * 0.06f);
 
         for (LivingEntity t : Targets.frontBox(p, 1.6, JAB_LENGTH, 2.2)) {
