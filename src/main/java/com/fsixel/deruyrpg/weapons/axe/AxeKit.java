@@ -119,6 +119,14 @@ public final class AxeKit implements WeaponKit, Listener {
     private final Map<UUID, BukkitTask> bleeds = new ConcurrentHashMap<>();
     /** 피버 전방위 평타 마지막 발동 틱 (허공 스윙 남용 방지). */
     private final Map<UUID, Integer> lastSweep = new ConcurrentHashMap<>();
+    /** 흡혈 대기 중인 평타 이벤트 (onMeleeHit 에서 기록 → MONITOR 에서 최종 확정 시 회복). 값 = 피버 여부. */
+    private final Map<UUID, PendingSteal> pendingSteal = new ConcurrentHashMap<>();
+    /** 피버 신속/힘이 덮어쓴 다른 출처의 낮은 등급 효과 (해제 시 남은 시간만큼 복원). */
+    private final Map<UUID, Map<PotionEffectType, SavedEffect>> overridden = new ConcurrentHashMap<>();
+
+    private record PendingSteal(EntityDamageByEntityEvent event, boolean fever) {}
+
+    private record SavedEffect(PotionEffect effect, int savedTick) {}
     private final AxeDisplays displays = new AxeDisplays();
     private BukkitTask sweeper;
     private int passiveCounter;
@@ -174,6 +182,9 @@ public final class AxeKit implements WeaponKit, Listener {
             refreshFeverPotion(p, PotionEffectType.STRENGTH, 0);
             // 처형 CC 무시·넉백 저항: 무기를 놓았다가 다시 든 경우 재적용
             if (!unstoppable.containsKey(p.getUniqueId())) startUnstoppable(ctx.plugin(), p);
+        } else if (overridden.containsKey(p.getUniqueId())) {
+            // 피버가 자연 종료되면 바닐라가 숨겨 둔 원래 효과를 되살리므로 기록만 버림
+            overridden.remove(p.getUniqueId());
         }
 
         if (t >= 1 && (++passiveCounter % 4 == 0)) {
@@ -182,18 +193,35 @@ public final class AxeKit implements WeaponKit, Listener {
         }
     }
 
-    private static void refreshFeverPotion(Player p, PotionEffectType type, int amp) {
+    /**
+     * 피버 효과 갱신. 다른 출처(물약·신호기)의 낮은 등급 효과가 있어도 덮어씀 — 그 효과는 기록해 두었다가
+     * removeFeverPotion 에서 남은 시간만큼 복원. 더 높은 등급은 그대로 둠.
+     */
+    private void refreshFeverPotion(Player p, PotionEffectType type, int amp) {
         PotionEffect cur = p.getPotionEffect(type);
-        if (cur == null || (cur.getAmplifier() <= amp && cur.getDuration() < 10)) {
+        if (cur == null || cur.getAmplifier() < amp || (cur.getAmplifier() == amp && cur.getDuration() < 10)) {
+            if (cur != null && cur.getAmplifier() < amp) {
+                overridden.computeIfAbsent(p.getUniqueId(), k -> new ConcurrentHashMap<>())
+                        .putIfAbsent(type, new SavedEffect(cur, Bukkit.getCurrentTick()));
+            }
             p.addPotionEffect(new PotionEffect(type, FEVER_POTION_TICKS, amp, true, false, true));
         }
     }
 
-    /** refreshFeverPotion 으로 붙인 효과만 제거 (다른 출처의 긴 효과·더 센 효과는 유지). */
-    private static void removeFeverPotion(Player p, PotionEffectType type, int amp) {
+    /** refreshFeverPotion 으로 붙인 효과만 제거 (다른 출처의 긴 효과·더 센 효과는 유지) + 덮어쓴 효과 복원. */
+    private void removeFeverPotion(Player p, PotionEffectType type, int amp) {
         PotionEffect cur = p.getPotionEffect(type);
+        Map<PotionEffectType, SavedEffect> saved = overridden.get(p.getUniqueId());
+        SavedEffect prev = saved == null ? null : saved.remove(type);
+        if (saved != null && saved.isEmpty()) overridden.remove(p.getUniqueId());
         if (cur != null && cur.getAmplifier() == amp && cur.isAmbient() && cur.getDuration() <= FEVER_POTION_TICKS) {
             p.removePotionEffect(type);
+            if (prev != null) {
+                PotionEffect pe = prev.effect();
+                int left = pe.isInfinite() ? pe.getDuration()
+                        : pe.getDuration() - (Bukkit.getCurrentTick() - prev.savedTick());
+                if (pe.isInfinite() || left > 0) p.addPotionEffect(pe.withDuration(left));
+            }
         }
     }
 
@@ -304,8 +332,8 @@ public final class AxeKit implements WeaponKit, Listener {
         Player p = ctx.player();
         if (p.isDead()) return;
         boolean fever = ctx.isFever();
-        double dealt = Math.min(event.getFinalDamage(), target.getHealth());
-        if (dealt > 0) lifesteal(p, dealt, fever);
+        // 흡혈은 피해가 최종 확정된 뒤(MONITOR) 처리 — 이후 다른 플러그인이 취소하면 회복도 없음
+        pendingSteal.put(p.getUniqueId(), new PendingSteal(event, fever));
         target.getWorld().spawnParticle(Particle.BLOCK, target.getLocation().add(0, 1, 0), 6, 0.25, 0.3, 0.25, 0, BLOOD);
 
         // 피버: 전방위 평타 — 원래 맞은 적에게도 범위 피해가 들어가도록 다음 틱에 무적시간을 지우고 따로 적용
@@ -316,7 +344,7 @@ public final class AxeKit implements WeaponKit, Listener {
                 if (!target.isValid() || target.isDead() || !p.isOnline() || p.isDead()) return;
                 double before = target.getHealth();
                 target.setNoDamageTicks(0);
-                Damage.skill(p, target, sweepDmg);
+                if (!Damage.skill(p, target, sweepDmg)) return;
                 double done = Math.max(0, before - (target.isDead() ? 0 : target.getHealth()));
                 if (done > 0) lifesteal(p, done, true);
             });
@@ -345,13 +373,26 @@ public final class AxeKit implements WeaponKit, Listener {
             if (e.equals(exclude)) continue;
             double before = e.getHealth();
             e.setNoDamageTicks(0);
-            Damage.skill(p, e, dmg);
+            if (!Damage.skill(p, e, dmg)) continue;
             total += Math.max(0, before - (e.isDead() ? 0 : e.getHealth()));
             e.getWorld().spawnParticle(Particle.BLOCK, e.getLocation().add(0, 1, 0), 6, 0.25, 0.3, 0.25, 0, BLOOD);
         }
         if (total > 0) lifesteal(p, total, true);
         displays.orbit(ctx.plugin(), p, 2, FEVER_SWEEP_RADIUS, 0.8f, 1.0, 6, 1.0, null, null);
         Fx.sound(p.getLocation(), Sound.ENTITY_PLAYER_ATTACK_SWEEP, 0.8f, 1.1f);
+    }
+
+    /** 도끼 평타 흡혈 — 피해가 취소되지 않고 최종 확정됐을 때만. */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onMeleeFinal(EntityDamageByEntityEvent e) {
+        if (Damage.isProbe()) return;
+        if (!(e.getDamager() instanceof Player p)) return;
+        PendingSteal ps = pendingSteal.get(p.getUniqueId());
+        if (ps == null || ps.event() != e) return; // 이 도끼의 onMeleeHit 를 거친 그 평타 이벤트만
+        pendingSteal.remove(p.getUniqueId());
+        if (p.isDead() || !(e.getEntity() instanceof LivingEntity target)) return;
+        double dealt = Math.min(e.getFinalDamage(), target.getHealth());
+        if (dealt > 0) lifesteal(p, dealt, ps.fever());
     }
 
     private void lifesteal(Player p, double dealt, boolean fever) {
@@ -535,8 +576,33 @@ public final class AxeKit implements WeaponKit, Listener {
         clearRage(player);
         stopUnstoppable(player);
         lastSweep.remove(player.getUniqueId());
+        pendingSteal.remove(player.getUniqueId());
         removeFeverPotion(player, PotionEffectType.SPEED, 2);
         removeFeverPotion(player, PotionEffectType.STRENGTH, 0);
+        overridden.remove(player.getUniqueId());
+    }
+
+    /** 플러그인 종료: 광폭화·넉백 저항 modifier, 피버 포션, CC 면역, 출혈·연출 작업 전부 정리. */
+    @Override
+    public void onPluginDisable() {
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            try {
+                onUnequip(p);
+                displays.clear(p);
+            } catch (Throwable ignored) {
+                // 한 명 실패가 나머지 정리를 막지 않게
+            }
+        }
+        for (BukkitTask t : unstoppable.values()) t.cancel();
+        unstoppable.clear();
+        for (BukkitTask t : bleeds.values()) t.cancel();
+        bleeds.clear();
+        if (sweeper != null) sweeper.cancel();
+        sweeper = null;
+        rage.clear();
+        lastSweep.clear();
+        pendingSteal.clear();
+        overridden.clear();
     }
 
     /** 접속 종료: 연출까지 즉시 정리. */
