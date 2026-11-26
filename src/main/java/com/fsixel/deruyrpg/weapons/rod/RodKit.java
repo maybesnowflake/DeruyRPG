@@ -27,7 +27,10 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerFishEvent;
+import org.bukkit.event.player.PlayerItemHeldEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
@@ -94,8 +97,10 @@ public final class RodKit implements WeaponKit, Listener {
     private final Map<UUID, Integer> lastLeftTick = new ConcurrentHashMap<>();
     /** 마지막 우클릭(⇧우 포함) 틱. 가짜 좌클릭 판별용. */
     private final Map<UUID, Integer> lastRightTick = new ConcurrentHashMap<>();
-    /** 장판·궁극기 등 진행 중 작업. onUnequip 에서 취소. */
+    /** 장판·궁극기 등 진행 중 작업. 무기를 놓아도 끝까지 진행, 접속 종료·사망 때만 취소. */
     private final Map<UUID, List<BukkitTask>> tasks = new ConcurrentHashMap<>();
+    /** 낚싯대 피버 마나 부스트가 적용된 플레이어 (손에서 놓으면 해제, 다시 들면 재적용). */
+    private final Set<UUID> boosted = ConcurrentHashMap.newKeySet();
 
     @Override
     public String id() {
@@ -145,6 +150,29 @@ public final class RodKit implements WeaponKit, Listener {
         if (ctx.isFever()) c = c.append(Component.text(" 피버: 쿨X 마나 " + Math.round(ctx.mana().get(ctx.player()) * 100) + "%/"
                 + Math.round(ctx.mana().max(ctx.player()) * 100) + "% 회복x5", NamedTextColor.GOLD));
         return c;
+    }
+
+    // ------------------------------------------------------------------ 피버 마나 부스트
+
+    /**
+     * 낚싯대 피버 중 다시 들었을 때 남은 피버 시간만큼 마나 부스트 재적용.
+     * 재적용 시 마나를 가득 채우지 않도록 현재 마나를 유지한다.
+     */
+    @Override
+    public void onPassiveTick(SkillContext ctx) {
+        Player p = ctx.player();
+        UUID id = p.getUniqueId();
+        if (ctx.isFever()) {
+            if (boosted.add(id)) {
+                int remain = ctx.fever().feverRemaining(p);
+                if (remain <= 0) return;
+                float cur = ctx.mana().get(p);
+                ctx.mana().boost(p, FEVER_MANA_MAX, FEVER_MANA_REGEN, remain);
+                ctx.mana().set(p, cur);
+            }
+        } else {
+            boosted.remove(id); // 피버 종료 → 부스트도 자체 만료
+        }
     }
 
     // ------------------------------------------------------------------ 모드
@@ -281,14 +309,16 @@ public final class RodKit implements WeaponKit, Listener {
         LivingEntity target = Targets.lookTarget(p, SINGLE_RANGE);
         if (target == null) return;
 
+        // PvP 꺼짐·보호 구역이면 마나·쿨 소모 없이 취소
+        if (!Damage.canHarm(p, target)) return;
+
         if (mode == BASIC) {
             if (!pay(ctx, SLOT_SINGLE[BASIC], MANA_SINGLE_BASIC, CD_SINGLE_BASIC)) return;
             Location from = p.getEyeLocation().add(0, -0.3, 0);
             dustLine(from, target.getLocation().add(0, target.getHeight() * 0.6, 0), Color.fromRGB(220, 220, 220), 0.3);
             target.getWorld().spawnParticle(Particle.FISHING, target.getLocation().add(0, 1, 0), 10, 0.3, 0.4, 0.3, 0.02);
             // 약한 마법 피해 후 당기기 (피해 넉백 뒤에 속도 덮어쓰기)
-            Damage.magic(p, target, 2);
-            pullTo(p, target);
+            if (Damage.magic(p, target, 2)) pullTo(p, target);
             Fx.sound(p.getLocation(), Sound.ENTITY_FISHING_BOBBER_THROW, 0.9f, 0.8f);
             Fx.sound(target.getLocation(), Sound.ENTITY_FISHING_BOBBER_RETRIEVE, 1f, 0.9f);
         } else {
@@ -395,6 +425,7 @@ public final class RodKit implements WeaponKit, Listener {
                 if (t % 10 == 0) {
                     for (LivingEntity e : Targets.enemiesAround(p, center, radius)) {
                         if (Math.abs(e.getLocation().getY() - center.getY()) > 3) continue;
+                        if (!Damage.canHarm(p, e)) continue;
                         e.addPotionEffect(new PotionEffect(PotionEffectType.DARKNESS, 60, 0, false, true, true));
                         e.addPotionEffect(new PotionEffect(PotionEffectType.GLOWING, 60, 0, false, false, true));
                         if (slowed.add(e.getUniqueId())) {
@@ -414,21 +445,24 @@ public final class RodKit implements WeaponKit, Listener {
     public void onUltimate(SkillContext ctx) {
         Player p = ctx.player();
         UUID id = p.getUniqueId();
-        // 피버 동안 최대 마나 300%, 회복 5배 (시작 시 가득 채움)
+        // 피버 동안 최대 마나 300%, 회복 5배 (시작 시 가득 채움). 손에서 놓으면 onUnequip 에서 해제.
         ctx.mana().boost(p, FEVER_MANA_MAX, FEVER_MANA_REGEN, feverDurationTicks());
+        boosted.add(id);
         Vector dir = p.getLocation().getDirection().setY(0);
         if (dir.lengthSquared() < 1e-6) dir = new Vector(0, 0, 1);
         dir.normalize();
         Location center = ground(p.getLocation().add(dir.multiply(5)));
         World w = center.getWorld();
 
-        List<LivingEntity> victims = Targets.enemiesAround(p, center, ULT_RADIUS);
+        List<LivingEntity> near = Targets.enemiesAround(p, center, ULT_RADIUS);
         for (LivingEntity e : Targets.enemiesAround(p, p.getLocation(), ULT_RADIUS)) {
-            if (!victims.contains(e)) victims.add(e);
+            if (!near.contains(e)) near.add(e);
         }
-        // 발동 즉시 피해
-        for (LivingEntity e : victims) {
-            Damage.magic(p, e, ULT_INSTANT_DMG);
+        // 발동 즉시 피해 — 피해가 실제로 들어간 대상만 끌어모음
+        List<LivingEntity> victims = new ArrayList<>();
+        for (LivingEntity e : near) {
+            if (!Damage.magic(p, e, ULT_INSTANT_DMG)) continue;
+            victims.add(e);
             w.spawnParticle(Particle.WITCH, e.getLocation().add(0, 1, 0), 8, 0.3, 0.5, 0.3, 0.05);
         }
 
@@ -536,6 +570,7 @@ public final class RodKit implements WeaponKit, Listener {
     private void finish(Player p, Location center) {
         World w = center.getWorld();
         for (LivingEntity e : Targets.enemiesAround(p, center, ULT_RADIUS)) {
+            if (!Damage.canHarm(p, e)) continue;
             e.addPotionEffect(new PotionEffect(PotionEffectType.WITHER, 100, 1, false, true, true));
             e.addPotionEffect(new PotionEffect(PotionEffectType.POISON, 100, 1, false, true, true));
             e.addPotionEffect(new PotionEffect(PotionEffectType.WEAKNESS, 160, 0, false, true, true));
@@ -590,6 +625,7 @@ public final class RodKit implements WeaponKit, Listener {
     /** 이 무기의 송곳니 피해 → 바닐라 피해 취소 후 Damage.magic 으로 대체 (아군·자신 보호). */
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onFangDamage(EntityDamageByEntityEvent e) {
+        if (Damage.isProbe()) return;
         if (!(e.getDamager() instanceof EvokerFangs fang)) return;
         PersistentDataContainer pdc = fang.getPersistentDataContainer();
         Double dmg = pdc.get(FANG_DMG_KEY, PersistentDataType.DOUBLE);
@@ -612,16 +648,43 @@ public final class RodKit implements WeaponKit, Listener {
 
     // ------------------------------------------------------------------ 정리
 
+    /**
+     * 손에서 놓음(여러 번 불려도 안전). 피버 마나 부스트만 해제 — 다른 마나 무기에서 무한 사용 방지.
+     * 장판·대마법은 끊지 않고 자체 타이머로 끝까지 진행 (사망·접속 종료 때만 정리).
+     */
     @Override
     public void onUnequip(Player player) {
         UUID id = player.getUniqueId();
         lastLeftTick.remove(id);
         lastRightTick.remove(id);
+        if (boosted.remove(id)) DeruyRPG.get().mana().clearBoost(player);
+        if (player.isDead()) cancelTasks(id);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onQuit(PlayerQuitEvent e) {
+        cancelTasks(e.getPlayer().getUniqueId());
+    }
+
+    /** 슬롯 변경 즉시 부스트 해제 (HudTask 의 최대 5틱 지연 동안 다른 마나 무기로 부스트 마나를 쓰지 못하게). */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onHeld(PlayerItemHeldEvent e) {
+        Player p = e.getPlayer();
+        if (!boosted.contains(p.getUniqueId())) return;
+        if (id().equals(Items.kitId(p.getInventory().getItem(e.getNewSlot())))) return;
+        if (boosted.remove(p.getUniqueId())) DeruyRPG.get().mana().clearBoost(p);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDeath(PlayerDeathEvent e) {
+        cancelTasks(e.getPlayer().getUniqueId());
+    }
+
+    private void cancelTasks(UUID id) {
         List<BukkitTask> list = tasks.remove(id);
-        if (list != null) {
-            synchronized (list) {
-                for (BukkitTask t : list) t.cancel();
-            }
+        if (list == null) return;
+        synchronized (list) {
+            for (BukkitTask t : list) t.cancel();
         }
     }
 
