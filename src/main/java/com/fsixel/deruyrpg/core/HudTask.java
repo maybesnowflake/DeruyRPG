@@ -125,7 +125,7 @@ public final class HudTask extends BukkitRunnable {
                         + " 피버 " + fmt(fever.feverRemaining(p)), NamedTextColor.GRAY));
             }
         } else {
-            int filled = (int) Math.floor(fever.get(p) / FeverManager.MAX * BAR_CELLS);
+            int filled = (int) Math.floor(fever.get(p) / fever.max() * BAR_CELLS);
             NamedTextColor color = fever.isFull(p) ? NamedTextColor.GOLD : NamedTextColor.YELLOW;
             b.append(Component.text("F ", NamedTextColor.WHITE));
             b.append(Component.text("▮".repeat(filled), color));

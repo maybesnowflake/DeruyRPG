@@ -69,13 +69,9 @@ public final class InputListener implements Listener {
         if (kit == null) return;
 
         Action a = e.getAction();
-        if (a == Action.RIGHT_CLICK_BLOCK && !p.isSneaking()
-                && e.getClickedBlock() != null && e.getClickedBlock().getType().isInteractable()) {
-            return; // 상자·문·작업대 등은 바닐라 상호작용 우선 (웅크리면 스킬)
-        }
         if (a == Action.RIGHT_CLICK_AIR || a == Action.RIGHT_CLICK_BLOCK) {
             fireRight(p, item, kit, e);
-        } else if (a == Action.LEFT_CLICK_AIR) { // 블록 좌클릭(채굴)은 스킬 안 씀
+        } else if (a == Action.LEFT_CLICK_AIR || a == Action.LEFT_CLICK_BLOCK) {
             Integer drop = lastDropTick.get(p.getUniqueId());
             if (drop != null && drop >= Bukkit.getCurrentTick() - 1) return;
             kit.onLeftClick(ctx(p, item, kit, e));
@@ -89,17 +85,7 @@ public final class InputListener implements Listener {
         ItemStack item = p.getInventory().getItemInMainHand();
         WeaponKit kit = plugin.kits().find(item);
         if (kit == null) return;
-        if (!p.isSneaking() && isInteractableEntity(e.getRightClicked())) return; // 주민·액자·탈것·보관함 등
         fireRight(p, item, kit, e);
-    }
-
-    private static boolean isInteractableEntity(org.bukkit.entity.Entity en) {
-        return en instanceof org.bukkit.inventory.Merchant
-                || en instanceof org.bukkit.entity.Hanging
-                || en instanceof org.bukkit.entity.Vehicle
-                || en instanceof org.bukkit.entity.ArmorStand
-                || en instanceof org.bukkit.inventory.InventoryHolder
-                || en instanceof org.bukkit.entity.Tameable t && t.isTamed();
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
