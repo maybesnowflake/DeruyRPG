@@ -30,6 +30,7 @@ import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Projectile;
+import org.bukkit.entity.Trident;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.inventory.ItemStack;
@@ -249,7 +250,7 @@ public final class SwordKit implements WeaponKit {
             });
 
             // 최대 중첩 크리티컬 → 0.1초 프리징
-            if (c.stacks >= COMBO_MAX_STACKS && crit) {
+            if (c.stacks >= COMBO_MAX_STACKS && crit && Damage.canHarm(p, target)) {
                 if (Cc.stun(target, FEVER_FREEZE_TICKS)) {
                     target.setFreezeTicks(Math.max(target.getFreezeTicks(), target.getMaxFreezeTicks() + 3));
                     p.getWorld().spawnParticle(Particle.SNOWFLAKE, at, 8, 0.3, 0.4, 0.3, 0.02);
@@ -267,8 +268,7 @@ public final class SwordKit implements WeaponKit {
         double dmg = EMPOWERED_SWEEP_BASE + stacks;
         for (LivingEntity e : Targets.frontBox(p, 5, 3.5, 2.5)) {
             if (e.equals(mainTarget)) continue;
-            Damage.skill(p, e, dmg);
-            Targets.push(e, p.getLocation(), 0.5, 0.2);
+            if (Damage.skill(p, e, dmg)) Targets.push(e, p.getLocation(), 0.5, 0.2);
         }
         Location base = p.getLocation().add(0, 1.0, 0);
         Vector fwd = flatDir(p);
@@ -321,7 +321,7 @@ public final class SwordKit implements WeaponKit {
     }
 
     /**
-     * 중첩 만료 · 피버 공속 해제 · 검을 놓았을 때(버리기·인벤토리 이동 등 onUnequip 이 안 오는 경우 포함) 정리.
+     * 중첩 만료 · 피버 공속 해제(이 무기로 시작한 피버가 끝나면) · 검을 놓았을 때 보조 정리 (onUnequip 지연 최대 5틱 사이).
      */
     private void ensureWatcher(DeruyRPG plugin) {
         if (watcher != null && !watcher.isCancelled()) return;
@@ -350,7 +350,7 @@ public final class SwordKit implements WeaponKit {
                         fs.remove();
                         continue;
                     }
-                    if (!holding(p) || p.isDead() || !plugin.fever().isFever(p)) {
+                    if (!holding(p) || p.isDead() || !plugin.fever().isFever(p, id())) {
                         fs.remove();
                         removeFeverSpeed(p);
                     }
@@ -440,17 +440,39 @@ public final class SwordKit implements WeaponKit {
         // 패링 성공: 피해 무효 + 공격자 구속 + 모루 소리
         event.setCancelled(true);
         boolean fever = ctx.isFever();
-        if (attacker != null && !attacker.equals(p) && Targets.isEnemy(p, attacker)) {
+        if (attacker != null && !attacker.equals(p) && Targets.isEnemy(p, attacker) && Damage.canHarm(p, attacker)) {
             attacker.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, fever ? 60 : 40, fever ? 3 : 2));
         }
-        if (damager instanceof Projectile proj) proj.remove();
+        if (damager instanceof Trident trident) {
+            reflectTrident(ctx.plugin(), p, trident);
+        } else if (damager instanceof Projectile proj) {
+            proj.remove();
+        }
 
         Location fx = p.getEyeLocation().add(flatDir(p).multiply(0.8)).subtract(0, 0.3, 0);
         Fx.sound(fx, Sound.BLOCK_ANVIL_LAND, 0.8f, 1.6f);
         Fx.sound(fx, Sound.ITEM_SHIELD_BLOCK, 1f, 1.4f);
         p.getWorld().spawnParticle(Particle.CRIT, fx, 20, 0.2, 0.2, 0.2, 0.4);
         p.getWorld().spawnParticle(Particle.ENCHANTED_HIT, fx, 10, 0.2, 0.2, 0.2, 0.2);
-        p.sendActionBar(Component.text("패링!", NamedTextColor.GOLD));
+        ctx.flash(Component.text("패링!", NamedTextColor.GOLD));
+    }
+
+    /**
+     * 삼지창은 지우면 아이템이 영구 소실되므로 튕겨낸다.
+     * 바닐라가 명중 처리 직후 속도를 거의 0으로 만들므로 다음 틱에 반사 속도를 넣는다.
+     */
+    private void reflectTrident(DeruyRPG plugin, Player p, Trident trident) {
+        Vector in = trident.getVelocity();
+        if (in.lengthSquared() < 1e-4) in = trident.getLocation().toVector().subtract(p.getLocation().toVector()).multiply(-1);
+        if (in.lengthSquared() < 1e-6) in = flatDir(p).multiply(-1);
+        double speed = Math.max(0.6, Math.min(2.0, in.length() * 0.7));
+        Vector out = in.clone().normalize().multiply(-speed);
+        out.setY(Math.max(out.getY(), 0) + 0.2);
+        final Vector v = out;
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            if (!trident.isValid()) return;
+            trident.setVelocity(v);
+        });
     }
 
     private static boolean isFrontal(Player p, Location from) {
@@ -501,7 +523,7 @@ public final class SwordKit implements WeaponKit {
                 p.getWorld().spawnParticle(Particle.SWEEP_ATTACK, c.clone().add(dir.clone().multiply(0.8)), 1, 0, 0, 0, 0);
                 for (LivingEntity e : Targets.enemiesAround(p, c, DASH_HIT_RADIUS + 0.5)) {
                     if (!hit.add(e.getUniqueId())) continue;
-                    Damage.skill(p, e, dmg);
+                    if (!Damage.skill(p, e, dmg)) continue;
                     Targets.push(e, p.getLocation(), 0.4, 0.25);
                     e.getWorld().spawnParticle(Particle.SWEEP_ATTACK, e.getLocation().add(0, e.getHeight() * 0.6, 0),
                             1, 0, 0, 0, 0);
@@ -672,7 +694,7 @@ public final class SwordKit implements WeaponKit {
             Vector c = e.getLocation().toVector().add(new Vector(0, e.getHeight() / 2, 0));
             if (distToSegment(c, a, b) > ULT_WIDTH) continue;
             hit.add(e.getUniqueId());
-            Damage.skill(p, e, ULT_DAMAGE);
+            if (!Damage.skill(p, e, ULT_DAMAGE)) continue;
             Location cl = c.toLocation(e.getWorld());
             e.getWorld().spawnParticle(Particle.CRIT, cl, 25, 0.3, 0.5, 0.3, 0.5);
             e.getWorld().spawnParticle(Particle.SWEEP_ATTACK, cl, 1, 0, 0, 0, 0);
@@ -736,6 +758,11 @@ public final class SwordKit implements WeaponKit {
 
     // =====================================================================
 
+    /**
+     * 무기 해제 (여러 번 불려도 안전). 중첩 공속·피버 공속·패링 창만 정리.
+     * 일섬·돌진은 자체 타이머로 끝까지 진행 (접속 종료·사망 시 타이머가 스스로 정리).
+     * 피버가 남아 있으면 다시 들었을 때 onPassiveTick 에서 피버 공속 재적용.
+     */
     @Override
     public void onUnequip(Player player) {
         UUID id = player.getUniqueId();
