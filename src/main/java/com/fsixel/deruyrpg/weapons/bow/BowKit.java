@@ -7,7 +7,6 @@ import com.fsixel.deruyrpg.util.Damage;
 import com.fsixel.deruyrpg.util.Fx;
 import com.fsixel.deruyrpg.util.Items;
 import com.fsixel.deruyrpg.util.Targets;
-import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
@@ -29,10 +28,11 @@ import org.bukkit.event.entity.ProjectileHitEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 import org.bukkit.util.Vector;
 
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -41,7 +41,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 활 — docs/SKILLS.md 의 "활" 항목.
- * P 풀차지(+25%) / 우 바닐라 사격 / 좌 발차기 / ⇧우 폭발 화살 3발 / F 워든 음파.
+ * P 풀차지(+25%) / 우 바닐라 사격 / 좌 발차기 / ⇧우 폭발 화살 3발(TNT급 범위) / F 피버: 사격마다 워든 음파 동반.
  */
 public final class BowKit implements WeaponKit, Listener {
 
@@ -55,13 +55,17 @@ public final class BowKit implements WeaponKit, Listener {
 
     private static final int EXPLOSIVE_SHOTS = 3;
     private static final int EXPLOSIVE_COOLDOWN = 300;    // 15초 (발동 시점부터)
-    private static final double EXPLOSION_RADIUS = 3.0;
-    private static final double EXPLOSION_DAMAGE = 6.0;
+    private static final double EXPLOSION_RADIUS = 4.5;   // TNT 수준
+    private static final double EXPLOSION_DAMAGE = 10.0;  // 중심 피해, 가장자리로 갈수록 감소
+    private static final double EXPLOSION_EDGE_RATIO = 0.25; // 반경 끝에서의 피해 비율
 
-    private static final int SONIC_CHARGE_TICKS = 8;
-    private static final double SONIC_RANGE = 15.0;
+    private static final double FEVER_MULT = 1.25;        // 피버 중 상시 피해 +25%
+    private static final double SONIC_RANGE = 30.0;
     private static final double SONIC_WIDTH = 1.5;
-    private static final double SONIC_DAMAGE = 14.0;
+    private static final double SONIC_DAMAGE = 10.0;      // 풀차지 기준, 당긴 정도에 비례 (최소 35%)
+    private static final double GLOW_RADIUS = 30.0;
+    private static final int GLOW_PERIOD = 20;            // 1초마다 갱신
+    private static final int GLOW_TICKS = 40;
 
     // ---- 화살 PDC ----
     private static final NamespacedKey ARROW_KEY = new NamespacedKey("deruyrpg", "bow_arrow");
@@ -72,8 +76,7 @@ public final class BowKit implements WeaponKit, Listener {
 
     // ---- 플레이어 상태 ----
     private final Map<UUID, Integer> explosiveCharges = new ConcurrentHashMap<>();
-    private final Map<UUID, BossBar> bars = new ConcurrentHashMap<>();
-    private boolean watcherStarted;
+    private final Map<UUID, Integer> lastGlow = new ConcurrentHashMap<>();
 
     @Override
     public String id() {
@@ -92,7 +95,7 @@ public final class BowKit implements WeaponKit, Listener {
                 "우  사격",
                 "좌  발차기 넉백",
                 "⇧우  다음 3발 폭발 화살",
-                "F  워든 음파");
+                "F  피버: 사격마다 워든 음파 동반 + 주변 적 발광, 피해 +25%");
     }
 
     @Override
@@ -165,59 +168,22 @@ public final class BowKit implements WeaponKit, Listener {
         if (!ctx.tryCooldown(Slot.SHIFT_RIGHT, EXPLOSIVE_COOLDOWN)) return;
 
         explosiveCharges.put(id, EXPLOSIVE_SHOTS);
-        updateBar(p);
-        startWatcher(ctx.plugin());
         Fx.sound(p.getLocation(), Sound.ENTITY_TNT_PRIMED, 0.8f, 1.3f);
         Fx.burst(p.getLocation().add(0, 1, 0), Particle.FLAME, 15, 0.4);
     }
 
-    private void updateBar(Player p) {
-        UUID id = p.getUniqueId();
-        int left = explosiveCharges.getOrDefault(id, 0);
-        if (left <= 0) {
-            explosiveCharges.remove(id);
-            BossBar bar = bars.remove(id);
-            if (bar != null) p.hideBossBar(bar);
-            return;
-        }
-        Component name = Component.text("폭발 화살 " + left + "/" + EXPLOSIVE_SHOTS + "발", NamedTextColor.RED);
-        float progress = Math.min(1f, left / (float) EXPLOSIVE_SHOTS);
-        BossBar bar = bars.get(id);
-        if (bar == null) {
-            bar = BossBar.bossBar(name, progress, BossBar.Color.RED, BossBar.Overlay.NOTCHED_6);
-            bars.put(id, bar);
-            p.showBossBar(bar);
-        } else {
-            bar.name(name);
-            bar.progress(progress);
-        }
-    }
-
-    /** 활을 버리거나 해서 손에서 사라진 경우(onUnequip 미호출) 상태 정리. */
-    private void startWatcher(DeruyRPG plugin) {
-        if (watcherStarted) return;
-        watcherStarted = true;
-        Bukkit.getScheduler().runTaskTimer(plugin, () -> {
-            Iterator<UUID> it = explosiveCharges.keySet().iterator();
-            while (it.hasNext()) {
-                UUID id = it.next();
-                Player p = Bukkit.getPlayer(id);
-                if (p == null || !id().equals(Items.kitId(p.getInventory().getItemInMainHand()))) {
-                    it.remove();
-                    BossBar bar = bars.remove(id);
-                    if (bar != null && p != null) p.hideBossBar(bar);
-                }
-            }
-            bars.keySet().removeIf(id -> !explosiveCharges.containsKey(id));
-        }, 10L, 10L);
+    @Override
+    public Component hudExtra(SkillContext ctx) {
+        int left = explosiveCharges.getOrDefault(ctx.player().getUniqueId(), 0);
+        if (left <= 0) return null;
+        return Component.text("💥 " + left + "/" + EXPLOSIVE_SHOTS, NamedTextColor.RED);
     }
 
     @Override
     public void onUnequip(Player player) {
         UUID id = player.getUniqueId();
         explosiveCharges.remove(id);
-        BossBar bar = bars.remove(id);
-        if (bar != null) player.hideBossBar(bar);
+        lastGlow.remove(id);
     }
 
     // =========================================================
@@ -232,14 +198,18 @@ public final class BowKit implements WeaponKit, Listener {
         PersistentDataContainer pdc = arrow.getPersistentDataContainer();
         pdc.set(ARROW_KEY, PersistentDataType.BYTE, (byte) 1);
         if (e.getForce() >= FULL_CHARGE_FORCE) pdc.set(FULL_KEY, PersistentDataType.BYTE, (byte) 1);
-        if (DeruyRPG.get().fever().isFever(p)) pdc.set(FEVER_KEY, PersistentDataType.BYTE, (byte) 1);
+        boolean fever = DeruyRPG.get().fever().isFever(p);
+        if (fever) {
+            pdc.set(FEVER_KEY, PersistentDataType.BYTE, (byte) 1);
+            fireSonicBoom(p, arrow.getVelocity(), e.getForce());
+        }
 
         UUID id = p.getUniqueId();
         int left = explosiveCharges.getOrDefault(id, 0);
         if (left > 0) {
             pdc.set(BOOM_KEY, PersistentDataType.BYTE, (byte) 1);
-            explosiveCharges.put(id, left - 1);
-            updateBar(p);
+            if (left - 1 <= 0) explosiveCharges.remove(id);
+            else explosiveCharges.put(id, left - 1);
             Fx.sound(p.getLocation(), Sound.ENTITY_TNT_PRIMED, 0.5f, 1.8f);
             trail(arrow);
         }
@@ -277,17 +247,22 @@ public final class BowKit implements WeaponKit, Listener {
         Entity direct = e.getHitEntity();
         Location at = direct != null ? direct.getLocation().add(0, direct.getHeight() / 2, 0) : arrow.getLocation();
         boolean fever = arrow.getPersistentDataContainer().has(FEVER_KEY, PersistentDataType.BYTE);
-        double dmg = fever ? EXPLOSION_DAMAGE * 1.3 : EXPLOSION_DAMAGE;
+        double base = fever ? EXPLOSION_DAMAGE * FEVER_MULT : EXPLOSION_DAMAGE;
 
-        // 블록 파괴 없는 직접 범위 피해. 직격 대상은 화살 피해에 합산 (onArrowDamage).
-        for (LivingEntity t : Targets.enemiesAround(p, at, EXPLOSION_RADIUS)) {
+        // 블록 파괴 없는 TNT급 범위 피해 (거리 감쇠). 직격 대상은 화살 피해에 합산 (onArrowDamage).
+        for (LivingEntity t : Targets.enemiesAround(p, at, EXPLOSION_RADIUS + 1.0)) {
             if (t.equals(direct)) continue;
-            Damage.skill(p, t, dmg);
-            Targets.push(t, at, 0.7, 0.4);
+            Location c = t.getLocation().add(0, t.getHeight() / 2, 0);
+            double dist = c.distance(at);
+            if (dist > EXPLOSION_RADIUS) continue;
+            double falloff = 1.0 - (1.0 - EXPLOSION_EDGE_RATIO) * (dist / EXPLOSION_RADIUS);
+            Damage.skill(p, t, base * falloff);
+            Targets.push(t, at, 0.4 + 0.9 * falloff, 0.25 + 0.35 * falloff);
         }
-        Fx.burst(at, Particle.EXPLOSION, 3, 0.6);
-        Fx.burst(at, Particle.SMOKE, 20, 0.8);
-        Fx.sound(at, Sound.ENTITY_GENERIC_EXPLODE, 1f, 1.1f);
+        Fx.burst(at, Particle.EXPLOSION_EMITTER, 1, 0);
+        Fx.burst(at, Particle.EXPLOSION, 8, 1.5);
+        Fx.burst(at, Particle.LARGE_SMOKE, 30, 1.5);
+        Fx.sound(at, Sound.ENTITY_GENERIC_EXPLODE, 2f, 0.9f);
 
         if (direct == null) arrow.remove(); // 블록에 박힌 폭발 화살은 소멸
     }
@@ -302,38 +277,61 @@ public final class BowKit implements WeaponKit, Listener {
         PersistentDataContainer pdc = arrow.getPersistentDataContainer();
 
         double dmg = e.getDamage();
-        if (pdc.has(FULL_KEY, PersistentDataType.BYTE)) {
-            dmg *= FULL_CHARGE_MULT;
+        boolean feverArrow = pdc.has(FEVER_KEY, PersistentDataType.BYTE);
+        // 피버 중엔 풀차지 여부와 상관없이 +25% (중첩 없음)
+        if (feverArrow || pdc.has(FULL_KEY, PersistentDataType.BYTE)) {
+            dmg *= feverArrow ? FEVER_MULT : FULL_CHARGE_MULT;
             e.getEntity().getWorld().spawnParticle(Particle.CRIT, e.getEntity().getLocation().add(0, 1, 0), 10, 0.3, 0.4, 0.3, 0.1);
         }
         if (boomState(arrow) == 2) {
             pdc.set(BOOM_KEY, PersistentDataType.BYTE, (byte) 3);
             if (arrow.getShooter() instanceof Player p && Targets.isEnemy(p, e.getEntity())) {
-                boolean fever = pdc.has(FEVER_KEY, PersistentDataType.BYTE);
-                dmg += fever ? EXPLOSION_DAMAGE * 1.3 : EXPLOSION_DAMAGE;
+                dmg += feverArrow ? EXPLOSION_DAMAGE * FEVER_MULT : EXPLOSION_DAMAGE;
             }
         }
         e.setDamage(dmg);
     }
 
     // =========================================================
-    // F 워든 음파
+    // F 피버: 사격마다 워든 음파 동반 + 주변 적 발광
     // =========================================================
     @Override
     public void onUltimate(SkillContext ctx) {
         Player p = ctx.player();
         Fx.sound(p.getLocation(), Sound.ENTITY_WARDEN_SONIC_CHARGE, 1.2f, 1.0f);
-        Bukkit.getScheduler().runTaskLater(ctx.plugin(), () -> {
-            if (!p.isOnline() || p.isDead()) return;
-            fireSonicBoom(p);
-        }, SONIC_CHARGE_TICKS);
+        Fx.sound(p.getLocation(), Sound.ENTITY_WARDEN_ROAR, 0.8f, 1.2f);
+        Fx.burst(p.getLocation().add(0, 1, 0), Particle.SCULK_SOUL, 25, 0.6);
+        lastGlow.remove(p.getUniqueId());
+        glowEnemies(p);
     }
 
-    private void fireSonicBoom(Player p) {
+    @Override
+    public void onPassiveTick(SkillContext ctx) {
+        if (!ctx.isFever()) {
+            lastGlow.remove(ctx.player().getUniqueId());
+            return;
+        }
+        Player p = ctx.player();
+        int now = Bukkit.getCurrentTick();
+        Integer last = lastGlow.get(p.getUniqueId());
+        if (last != null && now - last < GLOW_PERIOD) return;
+        glowEnemies(p);
+    }
+
+    private void glowEnemies(Player p) {
+        lastGlow.put(p.getUniqueId(), Bukkit.getCurrentTick());
+        for (LivingEntity t : Targets.enemiesAround(p, p.getLocation(), GLOW_RADIUS)) {
+            t.addPotionEffect(new PotionEffect(PotionEffectType.GLOWING, GLOW_TICKS, 0, false, false, false));
+        }
+    }
+
+    /** 화살과 같은 방향으로 워든 음파 발사 (피버 중 사격마다). */
+    private void fireSonicBoom(Player p, Vector arrowVel, float force) {
         Location eye = p.getEyeLocation();
-        Vector dir = eye.getDirection().normalize();
+        Vector dir = (arrowVel == null || arrowVel.lengthSquared() < 1e-6 ? eye.getDirection() : arrowVel.clone()).normalize();
         Vector flat = dir.clone().setY(0);
-        Vector kb = (flat.lengthSquared() < 1e-6 ? new Vector(0, 0, 0) : flat.normalize().multiply(1.6)).setY(0.5);
+        Vector kb = (flat.lengthSquared() < 1e-6 ? new Vector(0, 0, 0) : flat.normalize().multiply(1.2)).setY(0.4);
+        double dmg = SONIC_DAMAGE * Math.max(0.35, Math.min(1.0, force));
         Set<LivingEntity> hit = new HashSet<>();
 
         for (double d = 1.0; d <= SONIC_RANGE; d += 1.0) {
@@ -341,11 +339,11 @@ public final class BowKit implements WeaponKit, Listener {
             p.getWorld().spawnParticle(Particle.SONIC_BOOM, point, 1, 0, 0, 0, 0);
             for (Entity e : p.getWorld().getNearbyEntities(point, SONIC_WIDTH, SONIC_WIDTH, SONIC_WIDTH)) {
                 if (e instanceof LivingEntity le && Targets.isEnemy(p, e) && hit.add(le)) {
-                    Damage.pierce(p, le, SONIC_DAMAGE);
+                    Damage.pierce(p, le, dmg);
                     le.setVelocity(kb);
                 }
             }
         }
-        Fx.sound(eye, Sound.ENTITY_WARDEN_SONIC_BOOM, 2f, 1f);
+        Fx.sound(eye, Sound.ENTITY_WARDEN_SONIC_BOOM, 1.5f, 1.1f);
     }
 }
