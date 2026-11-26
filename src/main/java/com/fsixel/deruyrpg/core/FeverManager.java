@@ -25,7 +25,7 @@ public final class FeverManager {
 
     private double gainOnHit = 5.0;
     private double gainOnHurt = 2.0;
-    private double cooldownMultiplier = 0.5;
+    private double cooldownMultiplier = 1.0;
 
     public void load(ConfigurationSection sec) {
         if (sec == null) return;
