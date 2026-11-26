@@ -10,6 +10,7 @@ import com.fsixel.deruyrpg.DeruyRPG;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
+import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -33,7 +34,6 @@ import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitRunnable;
-import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
 import org.jetbrains.annotations.Nullable;
 
@@ -48,8 +48,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * P  직진 탄도  : 이 쇠뇌로 쏜 투사체를 시선 방향으로 재정렬 (탄퍼짐 제거, 다중발사 각도는 유지)
  * 우 사격       : 바닐라
  * 좌 발차기     : 전방 3칸 적 넉백 + 소량 피해 (1.5초 쿨)
- * ⇧우 구속 화살 : 10초간 쏘는 화살 명중 시 구속 II 3초 (20초 쿨)
- * F  유도 연사  : 피버 동안 4틱마다 자동 발사, 가장 가까운 적 유도
+ * ⇧우 구속 화살 : 10초간 쏘는 화살 명중 시 구속 III 7초 (20초 쿨)
+ * F  유도 연사  : 피버(15초) 동안 우클릭마다 장전 없이 즉시 유도 화살 (4틱 간격).
+ *                 발사 시 시선 ±35° 원뿔에서 시선에 가장 가까운 적을 고정, 가까울수록 강하게 보정.
+ *   피버 보너스 : 이 쇠뇌 화살 피해 +25%, 명중 넉백 +0.3, 모든 화살 구속 III 7초
  */
 public final class CrossbowKit implements WeaponKit, Listener {
 
@@ -68,20 +70,29 @@ public final class CrossbowKit implements WeaponKit, Listener {
 
     private static final int SLOW_MODE_TICKS = 200;       // 10초
     private static final int SLOW_MODE_COOLDOWN = 400;    // 20초 (피버 중 절반)
-    private static final int SLOW_EFFECT_TICKS = 60;      // 구속 3초
-    private static final int SLOW_AMPLIFIER = 1;          // 구속 II
+    private static final int SLOW_EFFECT_TICKS = 140;     // 구속 7초
+    private static final int SLOW_AMPLIFIER = 2;          // 구속 III
 
-    private static final int VOLLEY_INTERVAL = 4;
+    private static final int FEVER_SHOT_INTERVAL = 4;      // 피버 우클릭 최소 간격(틱)
     private static final double VOLLEY_SPEED = 2.6;
     private static final double VOLLEY_ARROW_DAMAGE = 1.0; // 바닐라 기본 2.0 (속도 곱)
-    private static final double HOMING_RANGE = 24.0;
-    private static final double HOMING_TURN = 0.35;
+    private static final double HOMING_RANGE = 32.0;       // 발사 시 타겟 탐색 거리
+    private static final double HOMING_CONE_DEG = 35.0;    // 시선 원뿔 반각
+    private static final double REACQUIRE_RANGE = 16.0;    // 타겟 사망 시 재지정 반경 (화살 기준)
+    private static final double HOMING_TURN_MIN = 0.12;    // 멀 때 보정 비율
+    private static final double HOMING_TURN_MAX = 0.6;     // 가까울 때 보정 비율
+    private static final double HOMING_RAMP_DIST = 16.0;   // 이 거리 이하부터 보정 증가
+    private static final double OCCLUDED_PENALTY_DEG = 60.0;
+    private static final double OCCLUDED_PENALTY_BLOCKS = 24.0;
     private static final int HOMING_LIFE = 60;
+
+    private static final double FEVER_DAMAGE_MULT = 1.25;
+    private static final double FEVER_KNOCKBACK = 0.3;
 
     /** 구속 화살 모드 종료 틱. */
     private final Map<UUID, Integer> slowUntil = new ConcurrentHashMap<>();
-    /** 유도 연사 태스크. */
-    private final Map<UUID, BukkitTask> volleyTasks = new ConcurrentHashMap<>();
+    /** 피버 즉시 사격 마지막 틱. */
+    private final Map<UUID, Integer> lastShot = new ConcurrentHashMap<>();
 
     @Override
     public String id() {
@@ -99,8 +110,8 @@ public final class CrossbowKit implements WeaponKit, Listener {
                 "P  직진 탄도",
                 "우  사격",
                 "좌  발차기 넉백",
-                "⇧우  10초간 구속 화살",
-                "F  유도 + 고속 연사");
+                "⇧우  10초간 구속 화살 (구속 III 7초)",
+                "F  피버: 우클릭마다 즉시 유도 사격");
     }
 
     @Override
@@ -109,11 +120,12 @@ public final class CrossbowKit implements WeaponKit, Listener {
     }
 
     // =====================================================================
-    // 우 — 바닐라 사격 (아무것도 안 함, cancel 금지)
+    // 우 — 바닐라 사격 (피버 중에는 즉시 유도 사격)
     // =====================================================================
 
     @Override
     public void onRightClick(SkillContext ctx) {
+        if (ctx.isFever()) feverShot(ctx);
     }
 
     // =====================================================================
@@ -173,10 +185,14 @@ public final class CrossbowKit implements WeaponKit, Listener {
     @Override
     public void onShiftRightClick(SkillContext ctx) {
         Player p = ctx.player();
+        if (ctx.isFever()) { // 피버 중엔 구속이 상시라 ⇧우도 즉시 사격
+            feverShot(ctx);
+            return;
+        }
         if (isSlowMode(p)) return; // 이미 활성 중이면 쿨다운 소모 없이 바닐라만
         if (!ctx.tryCooldown(Slot.SHIFT_RIGHT, SLOW_MODE_COOLDOWN)) return;
         slowUntil.put(p.getUniqueId(), Bukkit.getCurrentTick() + SLOW_MODE_TICKS);
-        p.sendActionBar(Component.text("구속 화살 활성 (10초)", NamedTextColor.AQUA));
+        p.sendActionBar(Component.text("구속 화살 활성 (10초) — 명중 시 구속 III 7초", NamedTextColor.AQUA));
         Fx.sound(p.getLocation(), Sound.BLOCK_POWDER_SNOW_PLACE, 1f, 0.7f);
         Fx.sound(p.getLocation(), Sound.ITEM_CROSSBOW_LOADING_END, 0.8f, 0.6f);
         Fx.ring(p.getLocation(), Particle.SNOWFLAKE, 1.2, 20);
@@ -208,50 +224,53 @@ public final class CrossbowKit implements WeaponKit, Listener {
     }
 
     // =====================================================================
-    // F — 유도 연사
+    // F — 유도 연사 (피버 동안 우클릭마다 장전 없이 즉시 유도 화살)
     // =====================================================================
 
     @Override
     public void onUltimate(SkillContext ctx) {
         Player p = ctx.player();
-        stopVolley(p);
+        if (p.hasActiveItem()) p.clearActiveItem(); // 장전 중이던 것 취소
+        lastShot.remove(p.getUniqueId());
         Fx.sound(p.getLocation(), Sound.ITEM_CROSSBOW_QUICK_CHARGE_3, 1f, 1.2f);
-        p.sendActionBar(Component.text("유도 연사!", NamedTextColor.GOLD));
-
-        BukkitTask task = Bukkit.getScheduler().runTaskTimer(ctx.plugin(), new Runnable() {
-            @Override
-            public void run() {
-                if (!p.isOnline() || p.isDead() || !ctx.plugin().fever().isFever(p)
-                        || !id().equals(Items.kitId(p.getInventory().getItemInMainHand()))) {
-                    stopVolley(p);
-                    return;
-                }
-                fireHoming(p);
-            }
-        }, 0L, VOLLEY_INTERVAL);
-        volleyTasks.put(p.getUniqueId(), task);
+        Fx.ring(p.getLocation().add(0, 0.2, 0), Particle.ELECTRIC_SPARK, 1.3, 24);
+        p.sendActionBar(Component.text("유도 연사! 우클릭으로 즉시 사격", NamedTextColor.GOLD));
     }
 
-    private void stopVolley(Player p) {
-        BukkitTask t = volleyTasks.remove(p.getUniqueId());
-        if (t != null) t.cancel();
+    /** 피버 중 우클릭: 바닐라 장전 취소 + 내부 간격마다 유도 화살 1발. */
+    private void feverShot(SkillContext ctx) {
+        Player p = ctx.player();
+        ctx.cancelVanilla();
+        if (p.hasActiveItem()) p.clearActiveItem();
+        int now = Bukkit.getCurrentTick();
+        Integer last = lastShot.get(p.getUniqueId());
+        if (last != null && now - last < FEVER_SHOT_INTERVAL) return;
+        lastShot.put(p.getUniqueId(), now);
+        fireHoming(p);
     }
 
     private void fireHoming(Player p) {
-        Vector dir = p.getEyeLocation().getDirection();
+        Location eye = p.getEyeLocation();
+        Vector dir = eye.getDirection().normalize();
         Arrow arrow = p.launchProjectile(Arrow.class, dir.clone().multiply(VOLLEY_SPEED));
         arrow.setShooter(p);
         arrow.setPickupStatus(AbstractArrow.PickupStatus.DISALLOWED);
         arrow.setDamage(VOLLEY_ARROW_DAMAGE);
         arrow.setCritical(true);
+        arrow.setGravity(false);
         byte flags = (byte) (FLAG_KIT | FLAG_HOMING | (isSlowMode(p) ? FLAG_SLOW : 0));
         arrow.getPersistentDataContainer().set(ARROW_KEY, PersistentDataType.BYTE, flags);
         Fx.sound(p.getLocation(), Sound.ITEM_CROSSBOW_SHOOT, 0.7f, 1.4f);
 
-        LivingEntity initial = nearestEnemy(p, p.getLocation());
+        LivingEntity initial = acquireCone(p);
+        if (initial != null) {
+            initial.getWorld().spawnParticle(Particle.ELECTRIC_SPARK, center(initial), 4, 0.2, 0.3, 0.2, 0.02);
+        }
+        final double speed = VOLLEY_SPEED;
         new BukkitRunnable() {
             int age = 0;
             LivingEntity target = initial;
+            boolean hadTarget = initial != null;
 
             @Override
             public void run() {
@@ -260,34 +279,80 @@ public final class CrossbowKit implements WeaponKit, Listener {
                     cancel();
                     return;
                 }
-                if (target == null || !target.isValid() || target.isDead()
-                        || target.getWorld() != arrow.getWorld()
-                        || target.getLocation().distanceSquared(arrow.getLocation()) > HOMING_RANGE * HOMING_RANGE) {
-                    target = nearestEnemy(p, arrow.getLocation());
+                if (target != null && (!target.isValid() || target.isDead() || target.getWorld() != arrow.getWorld())) {
+                    target = null;
                 }
+                // 고정 타겟이 죽으면 다음 가까운 적으로 재지정 (처음부터 타겟이 없던 화살은 직진)
+                if (target == null && hadTarget) target = reacquire(p, arrow);
                 if (target == null) return;
-                Vector vel = arrow.getVelocity();
-                double speed = Math.max(vel.length(), 1.5);
-                Vector to = target.getLocation().add(0, target.getHeight() * 0.5, 0).toVector()
-                        .subtract(arrow.getLocation().toVector());
-                if (to.lengthSquared() < 1e-6) return;
-                Vector steer = vel.clone().normalize().multiply(1 - HOMING_TURN)
-                        .add(to.normalize().multiply(HOMING_TURN));
-                if (steer.lengthSquared() < 1e-6) return;
+
+                Location aLoc = arrow.getLocation();
+                Vector to = center(target).toVector().subtract(aLoc.toVector());
+                double dist = to.length();
+                if (dist < 1e-3) return;
+                Vector cur = arrow.getVelocity();
+                if (cur.lengthSquared() < 1e-6) cur = to.clone();
+                cur.normalize();
+                Vector want = to.multiply(1.0 / dist);
+
+                double t;
+                if (dist <= speed * 1.5) {
+                    t = 1.0; // 바로 앞이면 정확히 조준
+                } else {
+                    double close = 1.0 - Math.min(dist, HOMING_RAMP_DIST) / HOMING_RAMP_DIST; // 0(멀다) ~ 1(가깝다)
+                    t = HOMING_TURN_MIN + (HOMING_TURN_MAX - HOMING_TURN_MIN) * close;
+                }
+                Vector steer = cur.multiply(1 - t).add(want.multiply(t));
+                if (steer.lengthSquared() < 1e-6) steer = want;
                 arrow.setVelocity(steer.normalize().multiply(speed));
-                arrow.getWorld().spawnParticle(Particle.ELECTRIC_SPARK, arrow.getLocation(), 1, 0, 0, 0, 0);
+                arrow.getWorld().spawnParticle(Particle.ELECTRIC_SPARK, aLoc, 1, 0, 0, 0, 0);
             }
         }.runTaskTimer(DeruyRPG.get(), 1L, 1L);
     }
 
-    private @Nullable LivingEntity nearestEnemy(Player p, Location from) {
-        List<LivingEntity> list = Targets.enemiesAround(p, from, HOMING_RANGE);
+    private static Location center(LivingEntity e) {
+        return e.getLocation().add(0, e.getHeight() * 0.5, 0);
+    }
+
+    /** 발사 시점: 시선 원뿔(±CONE) 안에서 시선에 가장 가까운 적. 블록 뒤 적은 후순위. */
+    private @Nullable LivingEntity acquireCone(Player p) {
+        Location eye = p.getEyeLocation();
+        Vector look = eye.getDirection().normalize();
+        double minCos = Math.cos(Math.toRadians(HOMING_CONE_DEG));
         LivingEntity best = null;
-        double bestD = Double.MAX_VALUE;
-        for (LivingEntity e : list) {
-            double d = e.getLocation().distanceSquared(from);
-            if (d < bestD) {
-                bestD = d;
+        double bestScore = Double.MAX_VALUE;
+        for (LivingEntity e : Targets.enemiesAround(p, eye, HOMING_RANGE)) {
+            Vector to = center(e).toVector().subtract(eye.toVector());
+            double d = to.length();
+            if (d < 1e-3) continue;
+            double cos = to.dot(look) / d;
+            if (cos < minCos) continue;
+            double angle = Math.toDegrees(Math.acos(Math.min(1.0, cos)));
+            double score = angle + d * 0.1;
+            if (!p.hasLineOfSight(e)) score += OCCLUDED_PENALTY_DEG;
+            if (score < bestScore) {
+                bestScore = score;
+                best = e;
+            }
+        }
+        return best;
+    }
+
+    /** 비행 중 재지정: 화살 기준 가장 가까운 적. 블록 뒤 적은 후순위. */
+    private @Nullable LivingEntity reacquire(Player p, Arrow arrow) {
+        Location from = arrow.getLocation();
+        LivingEntity best = null;
+        double bestScore = Double.MAX_VALUE;
+        for (LivingEntity e : Targets.enemiesAround(p, from, REACQUIRE_RANGE)) {
+            Vector to = center(e).toVector().subtract(from.toVector());
+            double d = to.length();
+            double score = d;
+            if (d > 1e-3 && from.getWorld().rayTraceBlocks(from, to.clone().normalize(), d,
+                    FluidCollisionMode.NEVER, true) != null) {
+                score += OCCLUDED_PENALTY_BLOCKS;
+            }
+            if (score < bestScore) {
+                bestScore = score;
                 best = e;
             }
         }
@@ -295,8 +360,20 @@ public final class CrossbowKit implements WeaponKit, Listener {
     }
 
     @Override
+    public @Nullable Component hudExtra(SkillContext ctx) {
+        Player p = ctx.player();
+        if (ctx.isFever()) return Component.text("유도 연사", NamedTextColor.GOLD);
+        Integer end = slowUntil.get(p.getUniqueId());
+        if (end != null && end > Bukkit.getCurrentTick()) {
+            int sec = (int) Math.ceil((end - Bukkit.getCurrentTick()) / 20.0);
+            return Component.text("구속 화살 " + sec + "s", NamedTextColor.AQUA);
+        }
+        return null;
+    }
+
+    @Override
     public void onUnequip(Player player) {
-        stopVolley(player);
+        lastShot.remove(player.getUniqueId());
         slowUntil.remove(player.getUniqueId());
     }
 
@@ -375,14 +452,36 @@ public final class CrossbowKit implements WeaponKit, Listener {
         }
     }
 
-    /** 구속 화살 명중. */
+    /** 피버 중 화살 피해 +25%. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onArrowDamageFever(EntityDamageByEntityEvent e) {
+        if (!(e.getDamager() instanceof Projectile proj)) return;
+        if ((flags(proj) & FLAG_KIT) == 0) return;
+        if (!(proj.getShooter() instanceof Player p) || !DeruyRPG.get().fever().isFever(p)) return;
+        if (!(e.getEntity() instanceof LivingEntity target) || !Targets.isEnemy(p, target)) return;
+        e.setDamage(e.getDamage() * FEVER_DAMAGE_MULT);
+    }
+
+    /** 구속 화살 명중 (피버 중엔 모든 화살) + 피버 넉백. */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onArrowDamage(EntityDamageByEntityEvent e) {
         if (!(e.getDamager() instanceof Projectile proj)) return;
         byte f = flags(proj);
-        if ((f & FLAG_KIT) == 0 || (f & FLAG_SLOW) == 0) return;
+        if ((f & FLAG_KIT) == 0) return;
         if (!(proj.getShooter() instanceof Player p)) return;
         if (!(e.getEntity() instanceof LivingEntity target) || !Targets.isEnemy(p, target)) return;
+        boolean fever = DeruyRPG.get().fever().isFever(p);
+        if (fever) {
+            Vector push = proj.getVelocity().setY(0);
+            if (push.lengthSquared() < 1e-6) push = target.getLocation().toVector().subtract(p.getLocation().toVector()).setY(0);
+            if (push.lengthSquared() > 1e-6) {
+                Vector kb = push.normalize().multiply(FEVER_KNOCKBACK).setY(0.08);
+                Bukkit.getScheduler().runTask(DeruyRPG.get(), () -> {
+                    if (target.isValid() && !target.isDead()) target.setVelocity(target.getVelocity().add(kb));
+                });
+            }
+        }
+        if ((f & FLAG_SLOW) == 0 && !fever) return;
         target.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, SLOW_EFFECT_TICKS, SLOW_AMPLIFIER, false, true, true));
         target.getWorld().spawnParticle(Particle.SNOWFLAKE, target.getLocation().add(0, 1, 0), 15, 0.3, 0.5, 0.3, 0.02);
         Fx.sound(target.getLocation(), Sound.BLOCK_POWDER_SNOW_BREAK, 1f, 0.8f);
