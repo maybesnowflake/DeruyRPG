@@ -41,7 +41,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 활 — docs/SKILLS.md 의 "활" 항목.
- * P 풀차지(+25%) / 우 바닐라 사격 / 좌 발차기 / ⇧우 폭발 화살 3발(TNT급 범위) / F 피버: 사격마다 워든 음파 동반.
+ * P 풀차지(+25%) / 우 바닐라 사격 / 좌 발차기 / ⇧우 폭발 화살 3발(TNT급 범위) / F 피버: 사격마다 워든 음파 동반, 화살 피해 +200%.
  */
 public final class BowKit implements WeaponKit, Listener {
 
@@ -95,7 +95,7 @@ public final class BowKit implements WeaponKit, Listener {
                 "우  사격",
                 "좌  발차기 넉백",
                 "⇧우  다음 3발 폭발 화살",
-                "F  피버: 사격마다 워든 음파 동반 + 주변 적 발광, 피해 +25%");
+                "F  피버: 사격마다 워든 음파 동반 + 주변 적 발광, 화살 피해 +200%");
     }
 
     @Override
@@ -133,18 +133,23 @@ public final class BowKit implements WeaponKit, Listener {
 
         double dmg = ctx.isFever() ? KICK_DAMAGE * 1.5 : KICK_DAMAGE;
         Location from = p.getLocation();
+        List<LivingEntity> passed = new java.util.ArrayList<>();
+        LivingEntity direct = null;
         for (LivingEntity t : targets) {
             if (t.equals(hitTarget) && hitEvent != null) {
-                // 지금 처리 중인 평타에 발차기 피해를 얹음 (무적 프레임 충돌 방지)
+                // 지금 처리 중인 평타에 발차기 피해를 얹음 (무적 프레임 충돌 방지). 넉백은 평타가 취소되지 않았을 때만.
                 hitEvent.setDamage(hitEvent.getDamage() + dmg);
-            } else {
-                Damage.skill(p, t, dmg);
+                direct = t;
+            } else if (Damage.skill(p, t, dmg)) {
+                passed.add(t);
             }
         }
-        // 바닐라 넉백이 덮어쓰지 않게 다음 틱에 밀어냄
+        // 바닐라 넉백이 덮어쓰지 않게 다음 틱에 밀어냄 (피해가 실제로 들어간 대상만)
         double push = ctx.isFever() ? KICK_PUSH * 1.2 : KICK_PUSH;
+        final LivingEntity directHit = direct;
         Bukkit.getScheduler().runTask(ctx.plugin(), () -> {
-            for (LivingEntity t : targets) {
+            if (directHit != null && !hitEvent.isCancelled()) passed.add(directHit);
+            for (LivingEntity t : passed) {
                 if (t.isValid() && !t.isDead()) Targets.push(t, from, push, 0.35);
             }
         });
@@ -181,6 +186,7 @@ public final class BowKit implements WeaponKit, Listener {
 
     @Override
     public void onUnequip(Player player) {
+        // 여러 번 불려도 안전 (맵 제거만). 피버 발광 갱신 상태도 여기서 정리 → 다시 들면 onPassiveTick 이 재개.
         UUID id = player.getUniqueId();
         explosiveCharges.remove(id);
         lastGlow.remove(id);
@@ -198,7 +204,7 @@ public final class BowKit implements WeaponKit, Listener {
         PersistentDataContainer pdc = arrow.getPersistentDataContainer();
         pdc.set(ARROW_KEY, PersistentDataType.BYTE, (byte) 1);
         if (e.getForce() >= FULL_CHARGE_FORCE) pdc.set(FULL_KEY, PersistentDataType.BYTE, (byte) 1);
-        boolean fever = DeruyRPG.get().fever().isFever(p);
+        boolean fever = DeruyRPG.get().fever().isFever(p, id()); // 이 활로 시작한 피버만 (발사 시점에 화살에 기록)
         if (fever) {
             pdc.set(FEVER_KEY, PersistentDataType.BYTE, (byte) 1);
             fireSonicBoom(p, arrow.getVelocity(), e.getForce());
@@ -256,8 +262,9 @@ public final class BowKit implements WeaponKit, Listener {
             double dist = c.distance(at);
             if (dist > EXPLOSION_RADIUS) continue;
             double falloff = 1.0 - (1.0 - EXPLOSION_EDGE_RATIO) * (dist / EXPLOSION_RADIUS);
-            Damage.skill(p, t, base * falloff);
-            Targets.push(t, at, 0.4 + 0.9 * falloff, 0.25 + 0.35 * falloff);
+            if (Damage.skill(p, t, base * falloff)) {
+                Targets.push(t, at, 0.4 + 0.9 * falloff, 0.25 + 0.35 * falloff);
+            }
         }
         Fx.burst(at, Particle.EXPLOSION_EMITTER, 1, 0);
         Fx.burst(at, Particle.EXPLOSION, 8, 1.5);
@@ -272,13 +279,14 @@ public final class BowKit implements WeaponKit, Listener {
     // =========================================================
     @EventHandler(priority = EventPriority.NORMAL, ignoreCancelled = true)
     public void onArrowDamage(EntityDamageByEntityEvent e) {
+        if (Damage.isProbe()) return;
         if (!isOurArrow(e.getDamager())) return;
         AbstractArrow arrow = (AbstractArrow) e.getDamager();
         PersistentDataContainer pdc = arrow.getPersistentDataContainer();
 
         double dmg = e.getDamage();
         boolean feverArrow = pdc.has(FEVER_KEY, PersistentDataType.BYTE);
-        // 피버 중엔 풀차지 여부와 상관없이 +25% (중첩 없음)
+        // 피버 화살은 풀차지 여부와 상관없이 ×3(+200%), 아니면 풀차지 +25% (중첩 없음)
         if (feverArrow || pdc.has(FULL_KEY, PersistentDataType.BYTE)) {
             dmg *= feverArrow ? FEVER_MULT : FULL_CHARGE_MULT;
             e.getEntity().getWorld().spawnParticle(Particle.CRIT, e.getEntity().getLocation().add(0, 1, 0), 10, 0.3, 0.4, 0.3, 0.1);
@@ -339,8 +347,7 @@ public final class BowKit implements WeaponKit, Listener {
             p.getWorld().spawnParticle(Particle.SONIC_BOOM, point, 1, 0, 0, 0, 0);
             for (Entity e : p.getWorld().getNearbyEntities(point, SONIC_WIDTH, SONIC_WIDTH, SONIC_WIDTH)) {
                 if (e instanceof LivingEntity le && Targets.isEnemy(p, e) && hit.add(le)) {
-                    Damage.pierce(p, le, dmg);
-                    le.setVelocity(kb);
+                    if (Damage.pierce(p, le, dmg)) le.setVelocity(kb);
                 }
             }
         }
