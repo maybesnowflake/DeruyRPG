@@ -7,6 +7,9 @@ import com.fsixel.deruyrpg.util.Damage;
 import com.fsixel.deruyrpg.util.Fx;
 import com.fsixel.deruyrpg.util.Items;
 import com.fsixel.deruyrpg.util.Targets;
+import io.papermc.paper.datacomponent.DataComponentTypes;
+import io.papermc.paper.datacomponent.item.AttackRange;
+import io.papermc.paper.datacomponent.item.SwingAnimation;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
@@ -20,7 +23,6 @@ import org.bukkit.World;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.attribute.AttributeModifier;
-import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
@@ -39,7 +41,6 @@ import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -52,10 +53,10 @@ import java.util.concurrent.ThreadLocalRandom;
  * 삼지창 — 스킬 명세: docs/SKILLS.md 의 "삼지창" 항목.
  *
  * P  물의 가호   : 나/적이 물·비에 닿아 있으면 근접(+투척) 추가 피해, 물속 공격 속도 증가, 물보라.
- * 우 투척/급류   : 바닐라. 투척은 시선 방향 직진. 비 소환 중엔 땅에서도 급류.
- * 좌 찌르기      : 사거리 4칸(아이템 modifier). 비 속이면 물살 찌르기(전방 6칸 관통 물줄기).
- * ⇧우 물기둥     : 전방 물기둥(파티클) → 범위 적 띄우기 + 피해.
- * F  뇌우+비 소환 : 피버 동안 비 파티클이 따라다니고 주변 적에게 번개. 나는 항상 젖은 상태.
+ * 우 투척/급류   : 물·비(궁극기 비 포함) 속이면 플러그인 급류 IV(인챈트 무관), 밖이면 시선 방향 직진 투척.
+ * 좌 찌르기      : 사거리 4칸, 창 찌르기 모션(SWING_ANIMATION=STAB). 비 속이면 물살 찌르기(전방 6칸 관통 물줄기).
+ * ⇧우 물기둥     : 바라보는 블록(최대 20칸)에 8칸 물기둥 → 범위 적 띄우기 + 피해.
+ * F  뇌우+비 소환 : 피버(15초) 동안 반경 5.5칸 비 + 범위 내 모든 적 초당 3회 번개 피해. 나는 항상 젖은 상태.
  */
 public final class TridentKit implements WeaponKit, Listener {
 
@@ -69,26 +70,30 @@ public final class TridentKit implements WeaponKit, Listener {
     private static final double STREAM_WIDTH = 1.0;
     private static final double STREAM_DAMAGE = 4.0;
 
-    private static final int COLUMN_COOLDOWN = 160;         // 물기둥 8초
-    private static final double COLUMN_DISTANCE = 3.5;
+    private static final int COLUMN_COOLDOWN = 14;          // 물기둥 0.7초
+    private static final double COLUMN_MAX_DISTANCE = 20.0; // 바라보는 블록 최대 거리
     private static final double COLUMN_RADIUS = 2.0;
-    private static final double COLUMN_HEIGHT = 4.5;
-    private static final double COLUMN_DAMAGE = 5.0;
+    private static final double COLUMN_HEIGHT = 8.0;
+    private static final double COLUMN_DAMAGE = 4.0;
+    private static final int COLUMN_TICKS = 30;
 
-    private static final int RIPTIDE_COOLDOWN = 20;         // 비 소환 중 땅 급류 1초
+    private static final int RIPTIDE_COOLDOWN = 6;          // 급류 0.3초
+    private static final int RIPTIDE_LEVEL = 4;             // 급류 IV
+    private static final int RIPTIDE_TICKS = 20;            // 바닐라 회전 공격 지속
+    private static final double RIPTIDE_DAMAGE = 7.0;
+    private static final double RIPTIDE_HIT_RADIUS = 1.6;
 
-    private static final int STORM_TICKS = 200;             // 피버 10초
-    private static final double STORM_RADIUS = 7.0;         // 비 파티클 / 젖음 판정 반경
-    private static final double LIGHTNING_RADIUS = 9.0;
-    private static final int LIGHTNING_INTERVAL = 20;       // 1초마다
-    private static final int LIGHTNING_TARGETS = 2;
-    private static final double LIGHTNING_DAMAGE = 5.0;
+    private static final double STORM_RADIUS = 5.5;         // 궁극기 범위 (비 / 젖음 / 번개)
+    private static final int[] STORM_HIT_TICKS = {0, 7, 14}; // 20틱 중 3회 = 초당 3회
+    private static final double STORM_DAMAGE = 2.0;         // 1회 피해 (초당 6)
+    private static final int STORM_BOLT_INTERVAL = 20;      // 진짜 번개 연출은 1초에 1번, 1명만
 
     private static final NamespacedKey REACH_KEY = new NamespacedKey("deruyrpg", "trident_reach");
     private static final NamespacedKey WATER_SPEED_KEY = new NamespacedKey("deruyrpg", "trident_water_speed");
 
     // ---- 상태 ----
     private final Map<UUID, BukkitTask> storms = new ConcurrentHashMap<>();
+    private final Map<UUID, BukkitTask> riptides = new ConcurrentHashMap<>();
     private final Set<UUID> waterSpeed = ConcurrentHashMap.newKeySet();
     private BukkitTask cleanupTask;
 
@@ -106,10 +111,10 @@ public final class TridentKit implements WeaponKit, Listener {
     public ItemStack createItem() {
         ItemStack item = Items.weapon(Material.TRIDENT, id(), "삼지창", NamedTextColor.AQUA,
                 "P  물의 가호 (물·비에 젖으면 추가 피해)",
-                "우  투척 / 급류 (직진 투척)",
+                "우  투척 (물·비 속: 급류 IV)",
                 "좌  찌르기 4칸 (비 속: 물살 찌르기)",
-                "⇧우  물기둥",
-                "F  뇌우 + 비 소환");
+                "⇧우  물기둥 (바라보는 곳, 20칸)",
+                "F  뇌우 + 비 소환 (반경 5.5칸)");
         // 아이템 modifier 를 하나라도 넣으면 바닐라 기본값이 사라지므로 삼지창 기본 공격력·속도를 다시 넣는다.
         item.editMeta(meta -> {
             meta.addAttributeModifier(Attribute.ATTACK_DAMAGE, new AttributeModifier(
@@ -121,12 +126,14 @@ public final class TridentKit implements WeaponKit, Listener {
             meta.addAttributeModifier(Attribute.ENTITY_INTERACTION_RANGE, new AttributeModifier(
                     REACH_KEY, REACH_BONUS, AttributeModifier.Operation.ADD_NUMBER, EquipmentSlotGroup.MAINHAND));
         });
+        // 창(spear)처럼 앞으로 찌르는 공격 모션 + 공격 사거리 4칸.
+        item.setData(DataComponentTypes.SWING_ANIMATION,
+                SwingAnimation.swingAnimation().type(SwingAnimation.Animation.STAB).duration(8).build());
+        item.setData(DataComponentTypes.ATTACK_RANGE, AttackRange.attackRange()
+                .minReach(0f).maxReach(3f + (float) REACH_BONUS)
+                .minCreativeReach(0f).maxCreativeReach(5f)
+                .hitboxMargin(0.3f).mobFactor(1f).build());
         return item;
-    }
-
-    @Override
-    public int feverDurationTicks() {
-        return STORM_TICKS;
     }
 
     @Override
@@ -312,23 +319,96 @@ public final class TridentKit implements WeaponKit, Listener {
     // 우 투척 / 급류
     // =====================================================================
 
-    /** 바닐라 투척/급류는 그대로. 비 소환 중 땅(물·비 밖)에서 급류 인챈트가 있으면 즉시 급류. */
+    /** 급류 가능 상태: 물·비·거품기둥 속 또는 궁극기 비 속. */
+    private boolean canRiptide(Player p) {
+        return inStorm(p) || p.isInWaterOrRainOrBubbleColumn();
+    }
+
+    /**
+     * 물·비 속이면 투척 대신 급류 IV (인챈트 무관, 플러그인 구현). 밖이면 바닐라 투척(직진 보정은 onLaunch).
+     */
     @Override
     public void onRightClick(SkillContext ctx) {
         Player p = ctx.player();
-        int level = ctx.item().getEnchantmentLevel(Enchantment.RIPTIDE);
-        if (level <= 0 || !inStorm(p) || p.isInWaterOrRain()) return; // 바닐라에 맡김
+        if (!canRiptide(p)) return; // 바닐라 투척
         ctx.cancelVanilla();
         if (!ctx.tryCooldown(Slot.RIGHT, RIPTIDE_COOLDOWN)) return;
+        riptide(ctx);
+    }
 
-        double power = 3.0 * (1.0 + level) / 4.0; // 바닐라 급류 공식
-        Vector v = p.getEyeLocation().getDirection().normalize().multiply(power);
-        if (p.isOnGround()) v.setY(Math.max(v.getY(), 0) + 0.45);
+    private void riptide(SkillContext ctx) {
+        Player p = ctx.player();
+        boolean fever = ctx.isFever();
+        double dmg = fever ? RIPTIDE_DAMAGE + 2 : RIPTIDE_DAMAGE;
+
+        // 바닐라 TridentItem.releaseUsing: 속도 = 3 * (1 + 레벨) / 4 (IV → 3.75), 시선 방향
+        double power = 3.0 * (1.0 + RIPTIDE_LEVEL) / 4.0;
+        Vector dir = p.getEyeLocation().getDirection().normalize();
+        Vector v = p.getVelocity().add(dir.clone().multiply(power));
+        // 바닐라는 땅 위면 1.2칸 들어 올림 → 속도로 근사
+        if (p.isOnGround()) v.setY(Math.max(v.getY(), 0) + 0.6);
         p.setVelocity(v);
-        p.startRiptideAttack(20, 8.0f, ctx.item());
-        p.getWorld().spawnParticle(Particle.SPLASH, p.getLocation().add(0, 1, 0), 40, 0.4, 0.6, 0.4, 0.2);
-        Fx.sound(p.getLocation(), Sound.ITEM_TRIDENT_THROW, 1f, 0.7f);
-        Fx.sound(p.getLocation(), Sound.ENTITY_PLAYER_SPLASH_HIGH_SPEED, 0.8f, 1.0f);
+
+        // 회전 연출: 바닐라 자동 회전 공격은 첫 타격에서 튕겨 멈추므로 포즈만 켜고 판정은 직접 처리
+        p.setRiptiding(true);
+        Location at = p.getLocation().add(0, 1, 0);
+        World w = p.getWorld();
+        w.spawnParticle(Particle.SPLASH, at, 50, 0.5, 0.7, 0.5, 0.3);
+        w.spawnParticle(Particle.BUBBLE_POP, at, 15, 0.4, 0.5, 0.4, 0.05);
+        Fx.sound(p.getLocation(), Sound.ITEM_TRIDENT_RIPTIDE_3, 1f, 1f);
+
+        UUID id = p.getUniqueId();
+        BukkitTask old = riptides.remove(id);
+        if (old != null) old.cancel();
+        Set<UUID> hit = new HashSet<>();
+        BukkitTask task = new BukkitRunnable() {
+            int t = 0;
+
+            @Override
+            public void run() {
+                if (!p.isOnline() || p.isDead() || t >= RIPTIDE_TICKS || (t > 3 && p.isOnGround())) {
+                    endRiptide(id, p);
+                    return;
+                }
+                Location c = p.getLocation().add(0, 0.5, 0);
+                World w = c.getWorld();
+                // 소용돌이 물보라
+                Vector mv = p.getVelocity();
+                Vector fwd = mv.lengthSquared() > 1e-4 ? mv.clone().normalize() : dir.clone();
+                Vector side = fwd.clone().crossProduct(new Vector(0, 1, 0));
+                if (side.lengthSquared() < 1e-4) side = new Vector(1, 0, 0);
+                side.normalize();
+                Vector up = side.clone().crossProduct(fwd).normalize();
+                for (int i = 0; i < 2; i++) {
+                    double ang = t * 0.9 + i * Math.PI;
+                    Vector off = side.clone().multiply(Math.cos(ang) * 0.9).add(up.clone().multiply(Math.sin(ang) * 0.9));
+                    w.spawnParticle(Particle.SPLASH, c.clone().add(off), 4, 0.05, 0.05, 0.05, 0.05);
+                    w.spawnParticle(Particle.BUBBLE_POP, c.clone().add(off), 1, 0.05, 0.05, 0.05, 0.01);
+                }
+                w.spawnParticle(Particle.FALLING_WATER, c, 2, 0.3, 0.3, 0.3, 0);
+
+                // 경로 적 피해 (적마다 1회)
+                for (Entity e : w.getNearbyEntities(c, RIPTIDE_HIT_RADIUS + 0.5, RIPTIDE_HIT_RADIUS + 1, RIPTIDE_HIT_RADIUS + 0.5)) {
+                    if (!Targets.isEnemy(p, e)) continue;
+                    LivingEntity le = (LivingEntity) e;
+                    if (le.getBoundingBox().getCenter().distanceSquared(c.toVector())
+                            > (RIPTIDE_HIT_RADIUS + le.getWidth() / 2) * (RIPTIDE_HIT_RADIUS + le.getWidth() / 2) + 1) continue;
+                    if (!hit.add(le.getUniqueId())) continue;
+                    Damage.skill(p, le, dmg);
+                    le.setVelocity(fwd.clone().setY(0).multiply(0.6).setY(0.35));
+                    splash(le.getLocation().add(0, le.getHeight() * 0.6, 0));
+                    Fx.sound(le.getLocation(), Sound.ITEM_TRIDENT_HIT, 0.8f, 1.2f);
+                }
+                t++;
+            }
+        }.runTaskTimer(ctx.plugin(), 1L, 1L);
+        riptides.put(id, task);
+    }
+
+    private void endRiptide(UUID id, Player p) {
+        BukkitTask task = riptides.remove(id);
+        if (task != null) task.cancel();
+        if (p != null && p.isOnline()) p.setRiptiding(false);
     }
 
     /** 투척은 탄퍼짐 없이 시선 방향 직진. */
@@ -351,12 +431,18 @@ public final class TridentKit implements WeaponKit, Listener {
         Player p = ctx.player();
         boolean fever = ctx.isFever();
         double radius = fever ? COLUMN_RADIUS + 0.75 : COLUMN_RADIUS;
-        double dmg = fever ? COLUMN_DAMAGE + 2 : COLUMN_DAMAGE;
+        double dmg = fever ? COLUMN_DAMAGE + 1.5 : COLUMN_DAMAGE;
+        double lift = fever ? 1.35 : 1.2;
 
         Location base = columnBase(p);
-        Fx.sound(base, Sound.ITEM_BUCKET_EMPTY, 1f, 0.8f);
-        Fx.sound(base, Sound.BLOCK_BUBBLE_COLUMN_UPWARDS_INSIDE, 1.2f, 1f);
-        Fx.sound(base, Sound.ENTITY_PLAYER_SPLASH_HIGH_SPEED, 1f, 0.7f);
+        World w = base.getWorld();
+        Fx.sound(base, Sound.ITEM_BUCKET_EMPTY, 1f, 0.7f);
+        Fx.sound(base, Sound.BLOCK_BUBBLE_COLUMN_UPWARDS_INSIDE, 1.4f, 0.9f);
+        Fx.sound(base, Sound.ENTITY_PLAYER_SPLASH_HIGH_SPEED, 1.2f, 0.6f);
+        Fx.sound(base, Sound.ENTITY_GENERIC_SPLASH, 1f, 0.8f);
+        // 솟구치는 첫 물보라
+        w.spawnParticle(Particle.SPLASH, base.clone().add(0, 0.3, 0), 120, radius * 0.6, 0.2, radius * 0.6, 0.5);
+        w.spawnParticle(Particle.BUBBLE_POP, base.clone().add(0, 0.5, 0), 40, radius * 0.5, 0.3, radius * 0.5, 0.1);
 
         Set<UUID> hit = new HashSet<>();
         new BukkitRunnable() {
@@ -364,36 +450,58 @@ public final class TridentKit implements WeaponKit, Listener {
 
             @Override
             public void run() {
-                if (t > 24 || !p.isOnline()) {
+                if (t > COLUMN_TICKS || !p.isOnline()) {
                     cancel();
                     return;
                 }
-                World w = base.getWorld();
-                // 연출
-                for (double y = 0; y <= COLUMN_HEIGHT; y += 0.5) {
-                    double r = radius * 0.45;
-                    w.spawnParticle(Particle.BUBBLE_COLUMN_UP, base.clone().add(0, y, 0), 4, r, 0.2, r, 0.05);
-                    w.spawnParticle(Particle.SPLASH, base.clone().add(0, y, 0), 3, r, 0.2, r, 0.05);
+                // 기둥이 아래에서 위로 자라남 (6틱 동안)
+                double h = Math.min(COLUMN_HEIGHT, COLUMN_HEIGHT * (t + 2) / 8.0);
+                double core = radius * 0.45;
+                ThreadLocalRandom r = ThreadLocalRandom.current();
+
+                // 몸통: 거품 기둥 + 물보라
+                for (double y = 0; y <= h; y += 0.4) {
+                    Location l = base.clone().add(0, y, 0);
+                    w.spawnParticle(Particle.BUBBLE_COLUMN_UP, l, 6, core, 0.15, core, 0.08);
+                    w.spawnParticle(Particle.SPLASH, l, 4, core, 0.15, core, 0.08);
+                    if (r.nextInt(3) == 0) w.spawnParticle(Particle.BUBBLE_POP, l, 2, core, 0.1, core, 0.02);
                 }
-                w.spawnParticle(Particle.SPLASH, base.clone().add(0, COLUMN_HEIGHT, 0), 20, radius * 0.6, 0.2, radius * 0.6, 0.3);
-                w.spawnParticle(Particle.FALLING_WATER, base.clone().add(0, COLUMN_HEIGHT, 0), 6, radius * 0.6, 0.1, radius * 0.6, 0);
-                if (t % 4 == 0) Fx.ring(base, Particle.SPLASH, radius, 20);
-                if (t % 8 == 0) Fx.sound(base, Sound.BLOCK_BUBBLE_COLUMN_UPWARDS_AMBIENT, 1f, 1f);
+                // 물방울 소용돌이 (3줄 나선)
+                for (int arm = 0; arm < 3; arm++) {
+                    for (double y = 0; y <= h; y += 0.35) {
+                        double ang = y * 1.3 + t * 0.45 + arm * (Math.PI * 2 / 3);
+                        double rr = radius * (0.55 + 0.25 * Math.sin(y * 0.8 + t * 0.3));
+                        Location l = base.clone().add(Math.cos(ang) * rr, y, Math.sin(ang) * rr);
+                        w.spawnParticle(Particle.SPLASH, l, 1, 0, 0, 0, 0);
+                        if (((int) (y * 10)) % 7 == 0) w.spawnParticle(Particle.DRIPPING_WATER, l, 1, 0, 0, 0, 0);
+                    }
+                }
+                // 꼭대기 왕관 + 쏟아지는 물
+                Location top = base.clone().add(0, h, 0);
+                w.spawnParticle(Particle.SPLASH, top, 35, radius * 0.7, 0.25, radius * 0.7, 0.4);
+                w.spawnParticle(Particle.BUBBLE_POP, top, 8, radius * 0.5, 0.2, radius * 0.5, 0.05);
+                w.spawnParticle(Particle.FALLING_WATER, top, 18, radius * 0.9, 0.3, radius * 0.9, 0);
+                // 바닥 물결
+                if (t % 4 == 0) {
+                    Fx.ring(base.clone().add(0, 0.1, 0), Particle.SPLASH, radius, 28);
+                    Fx.ring(base.clone().add(0, 0.1, 0), Particle.BUBBLE_POP, radius * 0.75, 14);
+                }
+                if (t % 8 == 0) Fx.sound(base, Sound.BLOCK_BUBBLE_COLUMN_UPWARDS_AMBIENT, 1.2f, 1f);
 
                 // 판정: 처음 들어온 적 = 피해 + 띄움, 이후 기둥 안에 있으면 계속 떠오름
-                for (Entity e : w.getNearbyEntities(base.clone().add(0, COLUMN_HEIGHT / 2, 0),
-                        radius + 0.5, COLUMN_HEIGHT / 2 + 1, radius + 0.5)) {
+                for (Entity e : w.getNearbyEntities(base.clone().add(0, h / 2, 0),
+                        radius + 0.5, h / 2 + 1, radius + 0.5)) {
                     if (!Targets.isEnemy(p, e)) continue;
                     LivingEntity le = (LivingEntity) e;
                     Location l = le.getLocation();
                     double dx = l.getX() - base.getX(), dz = l.getZ() - base.getZ();
                     double dy = l.getY() - base.getY();
-                    if (dx * dx + dz * dz > radius * radius || dy < -1 || dy > COLUMN_HEIGHT) continue;
+                    if (dx * dx + dz * dz > radius * radius || dy < -1 || dy > h) continue;
                     if (hit.add(le.getUniqueId())) {
                         Damage.skill(p, le, dmg);
-                        le.setVelocity(new Vector(0, fever ? 1.25 : 1.05, 0));
+                        le.setVelocity(new Vector(0, lift, 0));
                         splash(l.clone().add(0, 0.5, 0));
-                    } else if (t <= 16 && le.getVelocity().getY() < 0.3) {
+                    } else if (t <= COLUMN_TICKS - 8 && le.getVelocity().getY() < 0.3) {
                         le.setVelocity(le.getVelocity().setY(0.35));
                     }
                 }
@@ -402,21 +510,24 @@ public final class TridentKit implements WeaponKit, Listener {
         }.runTaskTimer(ctx.plugin(), 0L, 2L);
     }
 
-    /** 전방 3.5칸 지점의 바닥. 벽이 있으면 벽 앞. */
+    /** 바라보는 블록(최대 20칸) 위. 허공이면 그 지점 아래 바닥. */
     private Location columnBase(Player p) {
-        Location feet = p.getLocation();
-        Vector fwd = feet.getDirection().setY(0);
-        if (fwd.lengthSquared() < 1e-6) fwd = new Vector(0, 0, 1);
-        fwd.normalize();
-        Location from = feet.clone().add(0, 0.5, 0);
-        double dist = COLUMN_DISTANCE;
-        RayTraceResult wall = p.getWorld().rayTraceBlocks(from, fwd, COLUMN_DISTANCE, FluidCollisionMode.NEVER, true);
-        if (wall != null) dist = Math.max(0.5, wall.getHitPosition().distance(from.toVector()) - 0.5);
-        Location base = from.clone().add(fwd.multiply(dist));
-        RayTraceResult ground = p.getWorld().rayTraceBlocks(base, new Vector(0, -1, 0), 4, FluidCollisionMode.NEVER, true);
-        if (ground != null) base.setY(ground.getHitPosition().getY());
-        else base.setY(feet.getY());
-        return base;
+        Location eye = p.getEyeLocation();
+        Vector dir = eye.getDirection().normalize();
+        World w = p.getWorld();
+        RayTraceResult hit = w.rayTraceBlocks(eye, dir, COLUMN_MAX_DISTANCE, FluidCollisionMode.NEVER, true);
+        Location point;
+        if (hit != null) {
+            // 맞은 면 바깥쪽으로 살짝 빼서 블록 안에 묻히지 않게
+            Vector n = hit.getHitBlockFace() != null ? hit.getHitBlockFace().getDirection().multiply(0.3) : new Vector();
+            point = hit.getHitPosition().add(n).toLocation(w);
+        } else {
+            point = eye.clone().add(dir.multiply(COLUMN_MAX_DISTANCE));
+        }
+        RayTraceResult ground = w.rayTraceBlocks(point.clone().add(0, 0.1, 0), new Vector(0, -1, 0), 12,
+                FluidCollisionMode.NEVER, true);
+        if (ground != null) point.setY(ground.getHitPosition().getY());
+        return point;
     }
 
     // =====================================================================
@@ -432,12 +543,13 @@ public final class TridentKit implements WeaponKit, Listener {
         p.sendActionBar(Component.text("뇌우 소환!", NamedTextColor.AQUA));
 
         UUID id = p.getUniqueId();
+        int duration = feverDurationTicks(); // 피버 기본 15초
         BukkitTask task = new BukkitRunnable() {
             int t = 0;
 
             @Override
             public void run() {
-                if (t >= STORM_TICKS || !p.isOnline() || p.isDead()) {
+                if (t >= duration || !p.isOnline() || p.isDead()) {
                     stopStorm(id);
                     return;
                 }
@@ -463,15 +575,35 @@ public final class TridentKit implements WeaponKit, Listener {
                 }
                 if (t % 30 == 0) Fx.sound(c, Sound.WEATHER_RAIN, 0.8f, 1f);
 
-                // 번개
-                if (t % LIGHTNING_INTERVAL == 0) {
-                    List<LivingEntity> enemies = Targets.enemiesAround(p, c, LIGHTNING_RADIUS);
-                    enemies.sort(Comparator.comparingDouble(e -> e.getLocation().distanceSquared(c)));
-                    for (int i = 0; i < Math.min(LIGHTNING_TARGETS, enemies.size()); i++) {
-                        LivingEntity e = enemies.get(i);
-                        w.strikeLightningEffect(e.getLocation());
-                        w.spawnParticle(Particle.ELECTRIC_SPARK, e.getLocation().add(0, 1, 0), 25, 0.4, 0.8, 0.4, 0.2);
-                        Damage.magic(p, e, LIGHTNING_DAMAGE);
+                // 범위 표시
+                if (t % 10 == 0) Fx.ring(c.clone().add(0, 0.15, 0), Particle.SPLASH, STORM_RADIUS, 40);
+
+                // 번개: 범위 내 모든 적 초당 3회 (마법 피해, 무적시간 무시)
+                int phase = t % 20;
+                boolean hitTick = false;
+                for (int ht : STORM_HIT_TICKS) if (phase == ht) hitTick = true;
+                if (hitTick) {
+                    List<LivingEntity> enemies = Targets.enemiesAround(p, c, STORM_RADIUS);
+                    double dmg = STORM_DAMAGE;
+                    // 진짜 번개(빛+천둥)는 1초에 1번, 무작위 1명만 — 나머지는 전기 스파크
+                    LivingEntity bolt = (t % STORM_BOLT_INTERVAL == 0 && !enemies.isEmpty())
+                            ? enemies.get(r.nextInt(enemies.size())) : null;
+                    for (LivingEntity e : enemies) {
+                        Location el = e.getLocation();
+                        if (e.equals(bolt)) {
+                            w.strikeLightningEffect(el);
+                        } else {
+                            Fx.line(el.clone().add(r.nextDouble(-0.6, 0.6), 4.5, r.nextDouble(-0.6, 0.6)),
+                                    el.clone().add(0, e.getHeight() * 0.6, 0), Particle.ELECTRIC_SPARK, 0.35);
+                        }
+                        w.spawnParticle(Particle.ELECTRIC_SPARK, el.clone().add(0, e.getHeight() * 0.5, 0),
+                                10, 0.3, e.getHeight() * 0.35, 0.3, 0.15);
+                        e.setNoDamageTicks(0);
+                        Damage.magic(p, e, dmg);
+                    }
+                    if (!enemies.isEmpty() && bolt == null) {
+                        Fx.sound(c, Sound.ENTITY_GUARDIAN_ATTACK, 0.25f, 2f);
+                        Fx.sound(c, Sound.BLOCK_AMETHYST_BLOCK_HIT, 0.5f, 1.8f);
                     }
                 }
                 t++;
@@ -497,6 +629,7 @@ public final class TridentKit implements WeaponKit, Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
+        endRiptide(e.getPlayer().getUniqueId(), null);
         removeWaterSpeed(e.getPlayer());
         stopStorm(e.getPlayer().getUniqueId());
     }
