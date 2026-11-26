@@ -16,6 +16,7 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.attribute.AttributeModifier;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.ItemDisplay;
@@ -24,12 +25,10 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.inventory.EquipmentSlotGroup;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Transformation;
 import org.bukkit.util.Vector;
-import org.joml.AxisAngle4f;
-import org.joml.Quaternionf;
-import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -49,8 +48,17 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class SpearKit implements WeaponKit {
 
     static final NamespacedKey REACH_KEY = new NamespacedKey("deruyrpg", "spear_reach");
+    static final NamespacedKey FEVER_REACH_KEY = new NamespacedKey("deruyrpg", "spear_fever_reach");
 
     private static final double REACH_BONUS = 2.0;
+
+    // 피버
+    private static final double FEVER_REACH = 0.5;
+    private static final int FEVER_JAB_COOLDOWN = 26;   // 1.3초
+    private static final double SPLASH_RATIO = 0.6;     // 평타 범위 피해 비율
+    private static final double SPLASH_HALF = 1.0;      // 맞힌 대상 주변 2×2
+    private static final int LUNGE_COOLDOWN = 10;       // 0.5초 내부 쿨
+    private static final double LUNGE_SPEED = 1.15;
 
     // 우 연속 찌르기
     private static final int JAB_COUNT = 5;
@@ -67,6 +75,8 @@ public final class SpearKit implements WeaponKit {
     private final Map<UUID, List<BukkitTask>> tasks = new ConcurrentHashMap<>();
     /** 플레이어별 연출/소환 엔티티 — onUnequip 에서 제거. */
     private final Map<UUID, List<Entity>> summons = new ConcurrentHashMap<>();
+    /** 피버 돌진 내부 쿨 (다음 사용 가능 틱). */
+    private final Map<UUID, Integer> lungeReady = new ConcurrentHashMap<>();
 
     @Override
     public String id() {
@@ -107,17 +117,62 @@ public final class SpearKit implements WeaponKit {
 
         // 바닐라 창은 attack_range 컴포넌트가 실제 공격 사거리를 정하므로 같이 늘림.
         // 최소 사거리는 0 으로 (2칸 이내 추가 피해 패시브가 동작하도록).
-        AttackRange range = item.getData(DataComponentTypes.ATTACK_RANGE);
-        if (range != null) {
-            item.setData(DataComponentTypes.ATTACK_RANGE, AttackRange.attackRange()
-                    .minReach(0f)
-                    .maxReach(range.maxReach() + (float) REACH_BONUS)
-                    .minCreativeReach(0f)
-                    .maxCreativeReach(range.maxCreativeReach() + (float) REACH_BONUS)
-                    .hitboxMargin(range.hitboxMargin())
-                    .mobFactor(range.mobFactor())
-                    .build());
+        AttackRange range = attackRange(0f);
+        if (range != null) item.setData(DataComponentTypes.ATTACK_RANGE, range);
+    }
+
+    /** 바닐라 창 사거리 + 리치 보너스 + extra. 항상 새 바닐라 값에서 계산하므로 멱등. */
+    private static AttackRange attackRange(float extra) {
+        AttackRange range = new ItemStack(Material.NETHERITE_SPEAR).getData(DataComponentTypes.ATTACK_RANGE);
+        if (range == null) return null;
+        float add = (float) REACH_BONUS + extra;
+        return AttackRange.attackRange()
+                .minReach(0f)
+                .maxReach(range.maxReach() + add)
+                .minCreativeReach(0f)
+                .maxCreativeReach(range.maxCreativeReach() + add)
+                .hitboxMargin(range.hitboxMargin())
+                .mobFactor(range.mobFactor())
+                .build();
+    }
+
+    /** 이 창 아이템의 attack_range 를 (피버 여부에 맞게) 맞춤. 바뀌었으면 true. */
+    private boolean syncItemRange(ItemStack item, boolean fever) {
+        if (item == null || !id().equals(Items.kitId(item))) return false;
+        AttackRange want = attackRange(fever ? (float) FEVER_REACH : 0f);
+        AttackRange cur = item.getData(DataComponentTypes.ATTACK_RANGE);
+        if (want == null || (cur != null && Math.abs(cur.maxReach() - want.maxReach()) < 1e-4)) return false;
+        item.setData(DataComponentTypes.ATTACK_RANGE, want);
+        return true;
+    }
+
+    /** 피버 사거리 +0.5 : 플레이어 attribute(임시) + 들고 있는 창 attack_range. */
+    private void setFeverReach(Player p, boolean on) {
+        AttributeInstance inst = p.getAttribute(Attribute.ENTITY_INTERACTION_RANGE);
+        if (inst != null) {
+            boolean has = inst.getModifier(FEVER_REACH_KEY) != null;
+            if (on && !has) {
+                inst.addTransientModifier(new AttributeModifier(FEVER_REACH_KEY, FEVER_REACH,
+                        AttributeModifier.Operation.ADD_NUMBER));
+            } else if (!on && has) {
+                inst.removeModifier(FEVER_REACH_KEY);
+            }
         }
+        PlayerInventory inv = p.getInventory();
+        if (on) {
+            ItemStack hand = inv.getItemInMainHand();
+            if (syncItemRange(hand, true)) inv.setItemInMainHand(hand);
+        } else {
+            ItemStack[] contents = inv.getContents();
+            for (int i = 0; i < contents.length; i++) {
+                if (syncItemRange(contents[i], false)) inv.setItem(i, contents[i]);
+            }
+        }
+    }
+
+    @Override
+    public void onPassiveTick(SkillContext ctx) {
+        setFeverReach(ctx.player(), ctx.isFever());
     }
 
     // ------------------------------------------------------------------ P
@@ -127,18 +182,68 @@ public final class SpearKit implements WeaponKit {
         Player p = ctx.player();
         double dist = p.getLocation().toVector().setY(0)
                 .distance(target.getLocation().toVector().setY(0)) - target.getWidth() / 2.0;
-        if (dist > 2.0) return;
-        double bonus = ctx.isFever() ? 3.0 : 2.0;
-        event.setDamage(event.getDamage() + bonus);
-        Location at = target.getLocation().add(0, target.getHeight() * 0.6, 0);
-        Fx.burst(at, Particle.ENCHANTED_HIT, 8, 0.25);
+        if (dist <= 2.0) {
+            double bonus = ctx.isFever() ? 3.0 : 2.0;
+            event.setDamage(event.getDamage() + bonus);
+            Location at = target.getLocation().add(0, target.getHeight() * 0.6, 0);
+            Fx.burst(at, Particle.ENCHANTED_HIT, 8, 0.25);
+        }
+        if (ctx.isFever()) {
+            splash(p, target, event.getDamage() * SPLASH_RATIO);
+            tryLunge(ctx);
+        }
+    }
+
+    /** 피버: 맞힌 대상 주변 2×2 범위의 다른 적에게도 피해. */
+    private void splash(Player p, LivingEntity center, double dmg) {
+        Location c = center.getLocation();
+        boolean any = false;
+        for (Entity e : c.getWorld().getNearbyEntities(c, SPLASH_HALF + 0.5, 1.5, SPLASH_HALF + 0.5)) {
+            if (e.equals(center) || !Targets.isEnemy(p, e)) continue;
+            Location l = e.getLocation();
+            if (Math.abs(l.getX() - c.getX()) > SPLASH_HALF || Math.abs(l.getZ() - c.getZ()) > SPLASH_HALF) continue;
+            if (l.getY() < c.getY() - 1 || l.getY() > c.getY() + 2) continue;
+            LivingEntity t = (LivingEntity) e;
+            t.setNoDamageTicks(0);
+            Damage.skill(p, t, dmg);
+            Fx.burst(t.getLocation().add(0, t.getHeight() * 0.6, 0), Particle.CRIT, 5, 0.2);
+            any = true;
+        }
+        Location at = c.clone().add(0, 0.2, 0);
+        at.getWorld().spawnParticle(Particle.SWEEP_ATTACK, at.clone().add(0, center.getHeight() * 0.5, 0), 1, 0, 0, 0, 0);
+        if (any) Fx.sound(at, Sound.ENTITY_PLAYER_ATTACK_SWEEP, 0.7f, 1.2f);
+    }
+
+    // ------------------------------------------------------------------ 좌 (피버 돌진)
+
+    @Override
+    public void onLeftClick(SkillContext ctx) {
+        if (ctx.isFever()) tryLunge(ctx);
+    }
+
+    /** 피버: 돌진 II 느낌의 짧은 전방 돌진 (내부 쿨 0.5초). */
+    private void tryLunge(SkillContext ctx) {
+        Player p = ctx.player();
+        int now = ctx.plugin().getServer().getCurrentTick();
+        Integer ready = lungeReady.get(p.getUniqueId());
+        if (ready != null && now < ready) return;
+        lungeReady.put(p.getUniqueId(), now + LUNGE_COOLDOWN);
+
+        Vector dir = p.getLocation().getDirection().setY(0);
+        if (dir.lengthSquared() < 1e-6) return;
+        dir.normalize().multiply(LUNGE_SPEED);
+        dir.setY(p.isOnGround() ? 0.12 : Math.max(p.getVelocity().getY(), 0.0));
+        p.setVelocity(dir);
+        Location at = p.getLocation().add(0, 0.2, 0);
+        at.getWorld().spawnParticle(Particle.CLOUD, at, 6, 0.2, 0.05, 0.2, 0.02);
+        Fx.sound(at, Sound.ITEM_SPEAR_LUNGE_2, 0.9f, 1.0f);
     }
 
     // ------------------------------------------------------------------ 우
 
     @Override
     public void onRightClick(SkillContext ctx) {
-        if (!ctx.tryCooldown(Slot.RIGHT, JAB_COOLDOWN)) return; // 쿨 중이면 바닐라 돌격 그대로
+        if (!ctx.tryCooldown(Slot.RIGHT, ctx.isFever() ? FEVER_JAB_COOLDOWN : JAB_COOLDOWN)) return; // 쿨 중이면 바닐라 돌격 그대로
         ctx.cancelVanilla();
         Player p = ctx.player();
         double dmg = ctx.isFever() ? JAB_DAMAGE * 1.3 : JAB_DAMAGE;
@@ -156,30 +261,44 @@ public final class SpearKit implements WeaponKit {
                     return;
                 }
                 n++;
-                jab(p, dmg, n);
+                jab(ctx, p, dmg, n);
             }
         }, 0L, JAB_INTERVAL);
         track(p, holder[0]);
     }
 
-    private void jab(Player p, double dmg, int n) {
+    private void jab(SkillContext ctx, Player p, double dmg, int n) {
         p.swingMainHand();
         Location eye = p.getEyeLocation();
         Vector dir = eye.getDirection();
-        // 살짝 좌우로 흔들리는 찌르기 선
-        Vector right = new Vector(-dir.getZ(), 0, dir.getX());
-        if (right.lengthSquared() > 1e-6) right.normalize().multiply((n % 2 == 0 ? 0.15 : -0.15));
-        Location from = eye.clone().add(dir.clone().multiply(0.8)).add(right).subtract(0, 0.2, 0);
-        Location to = eye.clone().add(dir.clone().multiply(JAB_LENGTH)).add(right).subtract(0, 0.2, 0);
-        Fx.line(from, to, Particle.CRIT, 0.35);
-        to.getWorld().spawnParticle(Particle.SWEEP_ATTACK, to, 1, 0, 0, 0, 0);
-        Fx.sound(eye, Sound.ENTITY_PLAYER_ATTACK_STRONG, 0.6f, 1.5f + n * 0.08f);
+        miniSpears(p, eye.clone().subtract(0, 0.25, 0), dir, JAB_LENGTH - 1.5, 3, n);
+        Fx.sound(eye, Sound.ITEM_SPEAR_ATTACK, 0.7f, 1.3f + n * 0.06f);
 
         for (LivingEntity t : Targets.frontBox(p, 1.6, JAB_LENGTH, 2.2)) {
             t.setNoDamageTicks(0);
             Damage.skill(p, t, dmg);
             t.setVelocity(t.getVelocity().multiply(0.2)); // 연타 중 너무 멀리 밀리지 않게
             Fx.burst(t.getLocation().add(0, t.getHeight() * 0.6, 0), Particle.CRIT, 4, 0.2);
+        }
+    }
+
+    /**
+     * 작은 창 여러 개가 origin 앞에서 dir 방향으로 빠르게 찌르고 사라지는 연출.
+     * (플레이어 연속 찌르기와 고대 군단 병사 찌르기가 같이 씀)
+     */
+    void miniSpears(Player owner, Location origin, Vector dir, double distance, int count, int seed) {
+        Vector d = dir.clone().normalize();
+        Vector right = new Vector(-d.getZ(), 0, d.getX());
+        if (right.lengthSquared() < 1e-6) right = new Vector(1, 0, 0);
+        right.normalize();
+        Vector up = right.clone().crossProduct(d).normalize();
+        java.util.concurrent.ThreadLocalRandom r = java.util.concurrent.ThreadLocalRandom.current();
+        for (int i = 0; i < count; i++) {
+            double side = (i - (count - 1) / 2.0) * 0.45 + (seed % 2 == 0 ? 0.12 : -0.12);
+            double vert = r.nextDouble(-0.25, 0.25);
+            Location from = origin.clone().add(d.clone().multiply(0.9))
+                    .add(right.clone().multiply(side)).add(up.clone().multiply(vert));
+            SpearFx.miniThrust(this, owner, com.fsixel.deruyrpg.DeruyRPG.get(), from, d, distance, 0.55f, i % 2);
         }
     }
 
@@ -199,9 +318,9 @@ public final class SpearKit implements WeaponKit {
         Vector right = new Vector(-forward.getZ(), 0, forward.getX());
 
         // 거대 창 연출
-        Location spawn = base.clone().add(0, 1.2, 0);
-        spawn.setPitch(0);
-        ItemDisplay display = spawnSpearDisplay(p, spawn, 4.0f);
+        Location spawn = base.clone().add(0, 1.1, 0);
+        ItemDisplay display = SpearFx.spawn(spawn, forward, 4.0f, SpearFx.toV3(forward.clone().multiply(-1.0)));
+        track(p, display);
         Fx.sound(spawn, Sound.ITEM_TRIDENT_THROW, 1.0f, 0.6f);
         Fx.sound(spawn, Sound.ENTITY_IRON_GOLEM_ATTACK, 1.0f, 0.7f);
 
@@ -212,7 +331,7 @@ public final class SpearKit implements WeaponKit {
             Transformation t = display.getTransformation();
             display.setInterpolationDelay(0);
             display.setInterpolationDuration(4);
-            display.setTransformation(new Transformation(new Vector3f(0, 0, 3.0f),
+            display.setTransformation(new Transformation(SpearFx.toV3(fwd.clone().multiply(3.0)),
                     t.getLeftRotation(), t.getScale(), t.getRightRotation()));
         }, 2L);
 
@@ -245,25 +364,6 @@ public final class SpearKit implements WeaponKit {
         }, 16L);
     }
 
-    /**
-     * 창 모양 ItemDisplay. 위치의 yaw 방향(수평)으로 창끝이 향하도록 회전.
-     * 아이템 텍스처는 오른쪽 위 대각선(+x,+y)으로 그려져 있으므로 Z축 -45°, Y축 -90° 회전.
-     */
-    ItemDisplay spawnSpearDisplay(Player owner, Location at, float scale) {
-        ItemDisplay d = at.getWorld().spawn(at, ItemDisplay.class, e -> {
-            e.setItemStack(new ItemStack(Material.NETHERITE_SPEAR));
-            e.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.FIXED);
-            e.setPersistent(false);
-            e.setRotation(at.getYaw(), 0);
-            Quaternionf rot = new Quaternionf().rotateY((float) Math.toRadians(-90)).rotateZ((float) Math.toRadians(-45));
-            e.setTransformation(new Transformation(new Vector3f(0, 0, -1.0f), rot,
-                    new Vector3f(scale, scale, scale), new Quaternionf(new AxisAngle4f())));
-            Targets.markSummon(e);
-        });
-        track(owner, d);
-        return d;
-    }
-
     // ------------------------------------------------------------------ F
 
     @Override
@@ -293,6 +393,8 @@ public final class SpearKit implements WeaponKit {
 
     @Override
     public void onUnequip(Player player) {
+        setFeverReach(player, false);
+        lungeReady.remove(player.getUniqueId());
         List<BukkitTask> l = tasks.remove(player.getUniqueId());
         if (l != null) for (BukkitTask t : l) t.cancel();
         List<Entity> s = summons.remove(player.getUniqueId());

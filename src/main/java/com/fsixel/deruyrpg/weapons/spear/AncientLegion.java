@@ -16,7 +16,7 @@ import org.bukkit.block.Block;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
-import org.bukkit.entity.Mannequin;
+import org.bukkit.entity.Husk;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.EntityEquipment;
 import org.bukkit.inventory.ItemStack;
@@ -31,18 +31,18 @@ import java.util.UUID;
 
 /**
  * F 고대 군단 (아지르 궁극기 느낌).
- * 플레이어 양옆으로 병사(마네킹 + 창 + 금 갑옷) 6명이 일렬로 서서 앞으로 돌진,
- * 경로의 적을 밀쳐내며 피해 → 멈춘 뒤 각자 연속 찌르기 → 모래 먼지와 함께 사라짐.
+ * 플레이어 양옆으로 병사(사막 미라 허스크 + 창) 6명이 일렬로 서서 앞으로 돌진,
+ * 경로의 적을 밀쳐내며 피해 → 멈춘 뒤 각자 작은 창 연속 찌르기(플레이어 우클릭과 같은 연출) → 모래 먼지와 함께 사라짐.
  */
 final class AncientLegion {
 
     private static final double[] OFFSETS = {-3, -2, -1, 1, 2, 3};
 
-    private static final int SUMMON_DELAY = 8;      // 소환 후 돌진까지
+    private static final int SUMMON_DELAY = 2;      // 소환 후 0.1초 뒤 돌진
     private static final int CHARGE_TICKS = 16;     // 돌진 시간
     private static final double CHARGE_SPEED = 0.55; // 틱당 칸 (≈ 8.8칸)
     private static final int JABS = 4;
-    private static final int JAB_INTERVAL = 4;
+    private static final int JAB_INTERVAL = 3;
 
     private static final double CHARGE_DAMAGE = 7.0;
     private static final double JAB_DAMAGE = 2.5;
@@ -53,10 +53,11 @@ final class AncientLegion {
     private final SpearKit kit;
     private final SkillContext ctx;
     private final Player owner;
-    private final List<Mannequin> soldiers = new ArrayList<>();
+    private final List<Husk> soldiers = new ArrayList<>();
     private final Set<UUID> chargeHit = new HashSet<>();
     private Vector forward;
     private BukkitTask task;
+    private int jabCount = 0;
 
     AncientLegion(SpearKit kit, SkillContext ctx) {
         this.kit = kit;
@@ -84,7 +85,7 @@ final class AncientLegion {
             World w = at.getWorld();
             w.spawnParticle(Particle.BLOCK, at.clone().add(0, 0.5, 0), 25, 0.3, 0.6, 0.3, 0, SAND);
             w.spawnParticle(Particle.DUST, at.clone().add(0, 1, 0), 10, 0.3, 0.6, 0.3, 0, GOLD);
-            Mannequin m = w.spawn(at, Mannequin.class, this::setupSoldier);
+            Husk m = w.spawn(at, Husk.class, this::setupSoldier);
             soldiers.add(m);
             kit.track(owner, m);
         }
@@ -120,28 +121,34 @@ final class AncientLegion {
         kit.track(owner, task);
     }
 
-    private void setupSoldier(Mannequin m) {
+    private void setupSoldier(Husk m) {
         Targets.markSummon(m);
         m.setPersistent(false);
         m.setInvulnerable(true);
+        m.setAware(false);
         m.setAI(false);
         m.setGravity(false);
         m.setCollidable(false);
         m.setSilent(true);
-        m.setImmovable(true);
-        m.setDescription(Component.text("고대 병사", NamedTextColor.GOLD));
+        m.setRemoveWhenFarAway(false);
+        m.setCanPickupItems(false);
+        m.setBaby(false);
+        m.setShouldBurnInDay(false);
+        m.setConversionTime(-1);
+        m.customName(Component.text("고대 병사", NamedTextColor.GOLD));
+        m.setCustomNameVisible(false);
         EntityEquipment eq = m.getEquipment();
+        eq.clear();
         eq.setItemInMainHand(new ItemStack(Material.NETHERITE_SPEAR));
         eq.setHelmet(new ItemStack(Material.GOLDEN_HELMET));
-        eq.setChestplate(new ItemStack(Material.GOLDEN_CHESTPLATE));
-        eq.setLeggings(new ItemStack(Material.GOLDEN_LEGGINGS));
-        eq.setBoots(new ItemStack(Material.GOLDEN_BOOTS));
+        eq.setItemInMainHandDropChance(0f);
+        eq.setHelmetDropChance(0f);
     }
 
     /** 병사 전원 한 칸씩 전진, 경로의 적 밀쳐내기 + 피해. */
     private void chargeStep() {
         double dmg = ctx.isFever() ? CHARGE_DAMAGE * 1.2 : CHARGE_DAMAGE;
-        for (Mannequin m : soldiers) {
+        for (Husk m : soldiers) {
             if (!m.isValid()) continue;
             Location cur = m.getLocation();
             Location next = cur.clone().add(forward.clone().multiply(CHARGE_SPEED));
@@ -172,17 +179,17 @@ final class AncientLegion {
 
     /** 각 병사가 앞으로 한 번 찌르기. */
     private void jabStep() {
+        jabCount++;
         double dmg = ctx.isFever() ? JAB_DAMAGE * 1.2 : JAB_DAMAGE;
         Vector right = new Vector(-forward.getZ(), 0, forward.getX());
         boolean sound = true;
-        for (Mannequin m : soldiers) {
+        for (Husk m : soldiers) {
             if (!m.isValid()) continue;
             m.swingMainHand();
-            Location from = m.getLocation().add(0, 1.3, 0).add(forward.clone().multiply(0.6));
-            Location to = from.clone().add(forward.clone().multiply(3.0));
-            Fx.line(from, to, Particle.CRIT, 0.4);
+            Location from = m.getLocation().add(0, 1.35, 0);
+            kit.miniSpears(owner, from, forward, 3.0, 2, jabCount);
             if (sound) {
-                Fx.sound(from, Sound.ENTITY_PLAYER_ATTACK_STRONG, 0.9f, 1.3f);
+                Fx.sound(from, Sound.ITEM_SPEAR_ATTACK, 0.9f, 1.2f + jabCount * 0.06f);
                 sound = false;
             }
             Location origin = m.getLocation();
@@ -207,7 +214,7 @@ final class AncientLegion {
             kit.untrack(owner, task);
         }
         boolean sound = true;
-        for (Mannequin m : soldiers) {
+        for (Husk m : soldiers) {
             if (m.isValid()) {
                 Location at = m.getLocation();
                 at.getWorld().spawnParticle(Particle.BLOCK, at.clone().add(0, 1, 0), 30, 0.3, 0.7, 0.3, 0, SAND);
