@@ -8,6 +8,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.EntityEffect;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
@@ -16,14 +17,22 @@ import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.attribute.AttributeModifier;
 import org.bukkit.entity.AbstractArrow;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Projectile;
 import org.bukkit.entity.Trident;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
+import org.bukkit.util.Transformation;
 import org.bukkit.util.Vector;
+import org.joml.AxisAngle4f;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
+
+import java.util.ArrayList;
 
 import java.util.HashMap;
 import java.util.List;
@@ -37,6 +46,10 @@ final class Sanctuary {
     static final int DURATION = 160;
     static final double BLIND_RADIUS = 7.0;
     static final int MAX_REVIVES = 2;
+    static final int SHIELD_COUNT = 12;
+    static final double PUSH_RADIUS = RADIUS + 2.0;
+    /** 방패 고리 회전 속도 (라디안/틱). */
+    private static final double SPIN = 0.03;
 
     private static final NamespacedKey KB_KEY = new NamespacedKey("deruyrpg", "shield_unstoppable");
     private static final NamespacedKey EXPLOSION_KB_KEY = new NamespacedKey("deruyrpg", "shield_unstoppable_explosion");
@@ -47,6 +60,8 @@ final class Sanctuary {
     private final UUID owner;
     private final Location center;
     private final Map<UUID, Boolean> projectileInside = new HashMap<>();
+    private final List<ItemDisplay> shields = new ArrayList<>();
+    private final Map<UUID, OwnedRegen> reviveRegen = new HashMap<>();
     private final Runnable onEnd;
     private BukkitTask task;
     private int ticks;
@@ -67,14 +82,15 @@ final class Sanctuary {
         p.addPotionEffect(new PotionEffect(PotionEffectType.ABSORPTION, DURATION, 1, false, true));
         p.addPotionEffect(new PotionEffect(PotionEffectType.RESISTANCE, DURATION, 0, false, true));
         p.addPotionEffect(new PotionEffect(PotionEffectType.GLOWING, DURATION, 0, false, false));
-        p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, DURATION, 0, false, true));
         addModifier(p, Attribute.KNOCKBACK_RESISTANCE, KB_KEY);
         addModifier(p, Attribute.EXPLOSION_KNOCKBACK_RESISTANCE, EXPLOSION_KB_KEY);
         clearCc(p);
 
-        Fx.sound(center, Sound.ITEM_TOTEM_USE, 0.8f, 0.7f);
-        Fx.sound(center, Sound.BLOCK_BEACON_ACTIVATE, 1f, 1.2f);
+        Fx.sound(center, Sound.ITEM_SHIELD_BLOCK, 1f, 0.6f);
+        Fx.sound(center, Sound.ENTITY_IRON_GOLEM_REPAIR, 1f, 0.8f);
         Fx.sphere(center, Particle.END_ROD, RADIUS, 220);
+        spawnShields();
+        repel(p);
         p.sendActionBar(Component.text("성역 전개!", NamedTextColor.AQUA));
 
         task = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, 1L, 1L);
@@ -86,6 +102,7 @@ final class Sanctuary {
             end();
             return;
         }
+        if (ticks % 2 == 0) spinShields();
         if (ticks % 4 == 0) {
             Fx.sphere(center, Particle.END_ROD, RADIUS, 110);
             Fx.ring(center, Particle.ENCHANT, RADIUS, 32);
@@ -152,7 +169,8 @@ final class Sanctuary {
         double maxHp = max != null ? max.getValue() : 20.0;
         ally.setHealth(Math.min(maxHp, Math.max(8.0, maxHp * 0.4)));
         ally.setFireTicks(0);
-        ally.addPotionEffect(new PotionEffect(PotionEffectType.REGENERATION, 100, 1, false, true));
+        OwnedRegen g = OwnedRegen.apply(ally, 100, 1, false, true);
+        if (g != null) reviveRegen.put(ally.getUniqueId(), g);
         ally.addPotionEffect(new PotionEffect(PotionEffectType.ABSORPTION, 100, 0, false, true));
         ally.playEffect(EntityEffect.TOTEM_RESURRECT);
         Location l = ally.getLocation().add(0, 1, 0);
@@ -170,6 +188,14 @@ final class Sanctuary {
         ended = true;
         if (task != null) task.cancel();
         projectileInside.clear();
+        for (ItemDisplay d : shields) if (d.isValid()) d.remove();
+        shields.clear();
+        // 성역이 건 재생은 궁극기 종료와 함께 제거
+        for (Map.Entry<UUID, OwnedRegen> en : reviveRegen.entrySet()) {
+            Entity e = Bukkit.getEntity(en.getKey());
+            if (e instanceof LivingEntity le) en.getValue().strip(le);
+        }
+        reviveRegen.clear();
         Player p = Bukkit.getPlayer(owner);
         if (p != null) {
             removeModifier(p, Attribute.KNOCKBACK_RESISTANCE, KB_KEY);
@@ -177,6 +203,59 @@ final class Sanctuary {
         }
         Fx.sound(center, Sound.BLOCK_BEACON_DEACTIVATE, 0.8f, 1.2f);
         onEnd.run();
+    }
+
+    /** 발동 시 주변 적을 돔 바깥으로 밀쳐냄. */
+    private void repel(Player p) {
+        for (LivingEntity e : Targets.enemiesAround(p, center, PUSH_RADIUS)) {
+            double d = e.getLocation().distance(center);
+            double strength = 1.0 + Math.max(0, (RADIUS - d)) * 0.25;
+            Targets.push(e, center, strength, 0.45);
+            Location l = e.getLocation().add(0, 1, 0);
+            l.getWorld().spawnParticle(Particle.CLOUD, l, 6, 0.2, 0.3, 0.2, 0.05);
+        }
+        center.getWorld().spawnParticle(Particle.EXPLOSION, center.clone().add(0, 0.5, 0), 1);
+        Fx.ring(center, Particle.SWEEP_ATTACK, RADIUS, 16);
+        Fx.sound(center, Sound.ENTITY_GENERIC_EXPLODE, 0.6f, 1.6f);
+    }
+
+    /** 방패 ItemDisplay 를 돔 가장자리에 원형으로 배치. */
+    private void spawnShields() {
+        for (int i = 0; i < SHIELD_COUNT; i++) {
+            Location at = shieldLoc(i, 0);
+            ItemDisplay d = center.getWorld().spawn(at, ItemDisplay.class, e -> {
+                e.setItemStack(new ItemStack(Material.SHIELD));
+                e.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.FIXED);
+                e.setPersistent(false);
+                e.setRotation(at.getYaw(), 0);
+                e.setTeleportDuration(2);
+                e.setBrightness(new org.bukkit.entity.Display.Brightness(15, 15));
+                e.setTransformation(new Transformation(new Vector3f(), new Quaternionf(),
+                        new Vector3f(1.6f, 1.6f, 1.6f), new Quaternionf(new AxisAngle4f())));
+                Targets.markSummon(e);
+            });
+            shields.add(d);
+        }
+    }
+
+    private void spinShields() {
+        for (int i = 0; i < shields.size(); i++) {
+            ItemDisplay d = shields.get(i);
+            if (d.isValid()) d.teleport(shieldLoc(i, ticks * SPIN));
+        }
+    }
+
+    /** i 번째 방패 위치: 중심에서 바깥을 바라보도록 yaw 설정. */
+    private Location shieldLoc(int i, double offset) {
+        double a = offset + (Math.PI * 2 * i) / SHIELD_COUNT;
+        double x = Math.cos(a) * RADIUS;
+        double z = Math.sin(a) * RADIUS;
+        Location l = center.clone().add(x, 1.1, z);
+        // 바깥 방향 (x, z) 를 바라보는 yaw
+        float yaw = (float) Math.toDegrees(Math.atan2(-x, z));
+        l.setYaw(yaw);
+        l.setPitch(0);
+        return l;
     }
 
     private static void clearCc(Player p) {
