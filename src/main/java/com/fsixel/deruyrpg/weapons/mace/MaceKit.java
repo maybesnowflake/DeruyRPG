@@ -3,6 +3,7 @@ package com.fsixel.deruyrpg.weapons.mace;
 import com.fsixel.deruyrpg.DeruyRPG;
 import com.fsixel.deruyrpg.api.SkillContext;
 import com.fsixel.deruyrpg.api.WeaponKit;
+import com.fsixel.deruyrpg.util.Cc;
 import com.fsixel.deruyrpg.util.Damage;
 import com.fsixel.deruyrpg.util.Fx;
 import com.fsixel.deruyrpg.util.Items;
@@ -41,17 +42,17 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 철퇴.
- * P  낙하 강타: 바닐라 강타(Smash) 기반. 낙하 거리 비례 추가 피해, 계산 상한 20칸 (바닐라 보너스도 20칸에서 잘림).
+ * P  낙하 강타: 바닐라 강타(Smash) 기반. 낙하 거리 비례 추가 피해 (상한 없음, 바닐라 보너스 그대로).
  * 우 도약 강타: 위로 도약 → 착지 시 주변 범위 피해 + 띄우기. 착지 낙하 피해 무효.
  * 좌 강타: 평타 (바닐라 강타 유지).
  * ⇧우 돌풍: 공중에서만. 한 번 더 점프 (Wind Burst 느낌).
- * F  지진: 주변 블록이 FallingBlock 으로 튀어오름(설치 안 함) + 파동 범위 띄우기·피해.
+ * F  지진: 주변 블록이 FallingBlock 으로 튀어오름(설치 안 함) + 파동 범위 띄우기·피해·기절 0.5초.
+ * 피버: 낙하 강타 +15%, 도약 강타 쿨다운 0, 돌풍 공중 2회(착지 후 쿨다운 시작).
  */
 public final class MaceKit implements WeaponKit, Listener {
 
     // ---- 수치 ----
     private static final double SMASH_MIN_FALL = 1.5;     // 바닐라 강타 발동 조건
-    private static final double FALL_CAP = 20.0;          // 계산 상한 (칸)
     private static final double PASSIVE_PER_BLOCK = 0.4;  // 칸당 추가 피해
 
     private static final int LEAP_CD = 160;               // 8초
@@ -60,13 +61,17 @@ public final class MaceKit implements WeaponKit, Listener {
     private static final double LEAP_DAMAGE_FEVER = 8.0;
     private static final int LEAP_TIMEOUT = 80;           // 4초 안에 착지 못하면 취소
 
+    private static final double FEVER_SMASH_MULT = 1.15;  // 피버 낙하 강타 +15%
+
     private static final int GUST_CD = 60;                // 3초
+    private static final int FEVER_GUST_CHARGES = 2;      // 피버: 공중 체공 1회당 돌풍 2회
 
     private static final int QUAKE_WAVES = 6;             // 반경 1~6칸
     private static final int QUAKE_WAVE_INTERVAL = 2;
     private static final double QUAKE_DAMAGE = 9.0;
     private static final int BLOCK_LIFETIME = 25;
     private static final int QUAKE_DIVE_TIMEOUT = 60;
+    private static final int QUAKE_STUN = 10;             // 0.5초 기절
 
     /** 도약/지진 착지 대기 중인 작업. */
     private final Map<UUID, BukkitTask> landing = new ConcurrentHashMap<>();
@@ -74,6 +79,9 @@ public final class MaceKit implements WeaponKit, Listener {
     private final Map<UUID, Integer> noFallUntil = new ConcurrentHashMap<>();
     /** 지진 연출용 FallingBlock (블록 설치 금지 대상). */
     private final Set<UUID> quakeBlocks = ConcurrentHashMap.newKeySet();
+    /** 피버 돌풍: 이번 체공 중 사용 횟수 (착지 시 쿨다운 시작 후 제거). */
+    private final Map<UUID, Integer> gustAirUses = new ConcurrentHashMap<>();
+    private final Map<UUID, BukkitTask> gustLandWatch = new ConcurrentHashMap<>();
 
     @Override
     public String id() {
@@ -88,11 +96,12 @@ public final class MaceKit implements WeaponKit, Listener {
     @Override
     public ItemStack createItem() {
         return Items.weapon(Material.MACE, id(), "철퇴", NamedTextColor.GRAY,
-                "P  낙하 강타 — 낙하 거리 비례 추가 피해 (상한 20칸)",
+                "P  낙하 강타 — 낙하 거리 비례 추가 피해 (상한 없음)",
                 "우  도약 강타 — 착지 시 범위 피해 + 띄우기",
                 "좌  강타",
                 "⇧우  돌풍 — 공중에서 한 번 더 점프",
-                "F  지진");
+                "F  지진 — 충격파 피해 + 0.5초 기절",
+                "피버: 낙하 강타 +15%, 도약 쿨 0, 돌풍 공중 2회");
     }
 
     @Override
@@ -102,29 +111,18 @@ public final class MaceKit implements WeaponKit, Listener {
 
     // ================= P: 낙하 강타 =================
 
-    /** 바닐라 철퇴 강타 보너스 (밀도 인챈트 제외). */
-    private static double vanillaSmashBonus(double fall) {
-        if (fall <= 3) return 4 * fall;
-        if (fall <= 8) return 12 + 2 * (fall - 3);
-        return 22 + (fall - 8);
-    }
-
     @Override
     public void onMeleeHit(SkillContext ctx, LivingEntity target, EntityDamageByEntityEvent event) {
         Player p = ctx.player();
         double fall = p.getFallDistance();
         if (fall <= SMASH_MIN_FALL || p.isGliding()) return;
 
-        double dmg = event.getDamage();
-        // 바닐라 보너스를 20칸에서 자름
-        if (fall > FALL_CAP) {
-            dmg -= vanillaSmashBonus(fall) - vanillaSmashBonus(FALL_CAP);
-        }
-        double capped = Math.min(fall, FALL_CAP);
-        double bonus = capped * PASSIVE_PER_BLOCK * (ctx.isFever() ? 1.25 : 1.0);
-        event.setDamage(Math.max(0, dmg + bonus));
+        // 바닐라 강타 보너스는 그대로 두고, 낙하 거리 비례 추가 피해를 상한 없이 더함
+        double dmg = event.getDamage() + fall * PASSIVE_PER_BLOCK;
+        if (ctx.isFever()) dmg *= FEVER_SMASH_MULT;
+        event.setDamage(Math.max(0, dmg));
 
-        if (capped >= 5) {
+        if (fall >= 5) {
             Location at = target.getLocation();
             Fx.burst(at.clone().add(0, 0.3, 0), Particle.DUST_PLUME, 20, 0.6);
             Fx.burst(at.clone().add(0, 1, 0), Particle.CRIT, 15, 0.5);
@@ -137,7 +135,8 @@ public final class MaceKit implements WeaponKit, Listener {
     public void onRightClick(SkillContext ctx) {
         Player p = ctx.player();
         if (landing.containsKey(p.getUniqueId())) return;
-        if (!ctx.tryCooldown(Slot.RIGHT, LEAP_CD)) return;
+        // 피버: 쿨다운 0 (착지 전 재사용은 위 체크로 막힘)
+        if (!ctx.isFever() && !ctx.tryCooldown(Slot.RIGHT, LEAP_CD)) return;
         ctx.cancelVanilla();
 
         Vector dir = p.getLocation().getDirection().setY(0);
@@ -177,7 +176,19 @@ public final class MaceKit implements WeaponKit, Listener {
             p.sendActionBar(Component.text("돌풍은 공중에서만 쓸 수 있습니다", NamedTextColor.GRAY));
             return;
         }
-        if (!ctx.tryCooldown(Slot.SHIFT_RIGHT, GUST_CD)) return;
+        UUID id = p.getUniqueId();
+        Integer used = gustAirUses.get(id);
+        if (used != null) {
+            // 피버 체공 중 추가 사용
+            if (used >= FEVER_GUST_CHARGES) return;
+            gustAirUses.put(id, used + 1);
+        } else if (ctx.isFever()) {
+            if (ctx.onCooldown(Slot.SHIFT_RIGHT)) return;
+            gustAirUses.put(id, 1);
+            watchGustLanding(ctx.plugin(), p);
+        } else if (!ctx.tryCooldown(Slot.SHIFT_RIGHT, GUST_CD)) {
+            return;
+        }
 
         Vector v = p.getVelocity();
         Vector dir = p.getLocation().getDirection().setY(0);
@@ -189,6 +200,37 @@ public final class MaceKit implements WeaponKit, Listener {
         Fx.sound(at, Sound.ENTITY_WIND_CHARGE_WIND_BURST, 1f, 1f);
         at.getWorld().spawnParticle(Particle.GUST_EMITTER_SMALL, at, 1);
         Fx.burst(at, Particle.GUST, 4, 0.4);
+    }
+
+    /** 피버 돌풍: 착지하면 그때부터 쿨다운 시작. */
+    private void watchGustLanding(DeruyRPG plugin, Player p) {
+        UUID id = p.getUniqueId();
+        BukkitTask old = gustLandWatch.remove(id);
+        if (old != null) old.cancel();
+        final int[] age = {0};
+        BukkitTask task = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
+            age[0]++;
+            if (!p.isOnline() || p.isDead() || (age[0] > 3 && isGrounded(p))) {
+                finishGust(p);
+            }
+        }, 1L, 1L);
+        gustLandWatch.put(id, task);
+    }
+
+    private void finishGust(Player p) {
+        UUID id = p.getUniqueId();
+        BukkitTask t = gustLandWatch.remove(id);
+        if (t != null) t.cancel();
+        if (gustAirUses.remove(id) != null) {
+            DeruyRPG.get().cooldowns().set(p, id(), Slot.SHIFT_RIGHT, GUST_CD);
+        }
+    }
+
+    @Override
+    public @Nullable Component hudExtra(SkillContext ctx) {
+        Integer used = gustAirUses.get(ctx.player().getUniqueId());
+        if (used == null) return null;
+        return Component.text("돌풍 " + (FEVER_GUST_CHARGES - used) + "/" + FEVER_GUST_CHARGES, NamedTextColor.AQUA);
     }
 
     // ================= F: 지진 =================
@@ -247,6 +289,7 @@ public final class MaceKit implements WeaponKit, Listener {
             if (d < inner || d > outer || Math.abs(e.getLocation().getY() - center.getY()) > 3) continue;
             if (!hit.add(e.getUniqueId())) continue;
             Damage.skill(p, e, QUAKE_DAMAGE);
+            Cc.stun(e, QUAKE_STUN);               // 기절 먼저 (stun 이 속도를 초기화하므로)
             Targets.push(e, center, 0.3, 1.0);
             Fx.burst(e.getLocation().add(0, 0.5, 0), Particle.CRIT, 10, 0.4);
         }
@@ -375,5 +418,6 @@ public final class MaceKit implements WeaponKit, Listener {
         UUID id = player.getUniqueId();
         cancelLanding(id);
         noFallUntil.remove(id);
+        finishGust(player);
     }
 }
