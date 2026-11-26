@@ -39,6 +39,8 @@ import org.bukkit.util.Vector;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -62,11 +64,24 @@ public final class RodKit implements WeaponKit, Listener {
             NamedTextColor.LIGHT_PURPLE, NamedTextColor.GOLD, NamedTextColor.DARK_AQUA};
 
     // 수치
-    private static final double LEFT_RANGE = 20;
-    private static final int LEFT_CD = 15;
-    private static final float MANA_LEFT_BASIC = 0.12f, MANA_LEFT_CARROT = 0.10f, MANA_LEFT_FUNGUS = 0.12f;
+    private static final double SINGLE_RANGE = 20;
+    private static final int CD_SINGLE_BASIC = 20, CD_SINGLE_CARROT = 15, CD_SINGLE_FUNGUS = 15;
+    private static final float MANA_SINGLE_BASIC = 0.12f, MANA_SINGLE_CARROT = 0.10f, MANA_SINGLE_FUNGUS = 0.12f;
     private static final float MANA_AOE_BASIC = 0.28f, MANA_AOE_CARROT = 0.25f, MANA_AOE_FUNGUS = 0.30f;
     private static final int CD_AOE_BASIC = 120, CD_AOE_CARROT = 300, CD_AOE_FUNGUS = 300;
+    /** 피버 중: 쿨다운 없음, 대신 마나 소모 배율. */
+    private static final float FEVER_MANA_MUL = 3f;
+
+    private static final double FANG_DMG = 8;
+    private static final double ZONE_RADIUS = 6;
+    private static final int ZONE_TICKS = 120;
+    private static final double ULT_RADIUS = 6;
+    private static final double ULT_INSTANT_DMG = 2;
+    private static final double ULT_FANG_DMG = 5;
+
+    /** 모드별 쿨다운 슬롯 이름. */
+    private static final String[] SLOT_SINGLE = {"우·기본", "우·당근", "우·균"};
+    private static final String[] SLOT_AOE = {"⇧우·기본", "⇧우·당근", "⇧우·균"};
 
     private static final Color[] RAINBOW = {
             Color.fromRGB(255, 70, 70), Color.fromRGB(255, 170, 40), Color.fromRGB(255, 240, 80),
@@ -92,12 +107,13 @@ public final class RodKit implements WeaponKit, Listener {
     public ItemStack createItem() {
         ItemStack item = Items.weapon(Material.FISHING_ROD, id(), "낚싯대", NamedTextColor.LIGHT_PURPLE,
                 "P  경험치 바 = 마나",
-                "우  모드 변경 (기본/당근/균)",
-                "좌  모드별 단일 마법",
-                "   기본: 끌어오기 / 당근: 신속+재생 / 균: 구속+나약함",
+                "좌  모드 변경 (기본/당근/균)",
+                "우  모드별 단일 마법",
+                "   기본: 끌어오기 / 당근: 신속+재생 II / 균: 나약함+위더",
                 "⇧우  모드별 범위 마법",
-                "   기본: 송곳니 / 당근: 힘+저항 / 균: 어둠 장판",
-                "F  대마법");
+                "   기본: 송곳니 두 줄 / 당근: 포화+힘 / 균: 어둠·구속 장판",
+                "F  대마법: 휘감는 송곳니 소용돌이",
+                "피버: 쿨다운 없음, 마나 소모 3배");
         item.editMeta(m -> m.getPersistentDataContainer().set(MODE_KEY, PersistentDataType.INTEGER, BASIC));
         return item;
     }
@@ -109,7 +125,21 @@ public final class RodKit implements WeaponKit, Listener {
 
     @Override
     public String[] cooldownSlots() {
-        return new String[]{Slot.LEFT, Slot.SHIFT_RIGHT};
+        return new String[]{SLOT_SINGLE[BASIC], SLOT_AOE[BASIC]};
+    }
+
+    @Override
+    public String[] cooldownSlots(Player player) {
+        int m = mode(player.getInventory().getItemInMainHand());
+        return new String[]{SLOT_SINGLE[m], SLOT_AOE[m]};
+    }
+
+    @Override
+    public Component hudExtra(SkillContext ctx) {
+        int m = mode(ctx);
+        Component c = Component.text("✦ " + MODE_NAME[m], MODE_COLOR[m]);
+        if (ctx.isFever()) c = c.append(Component.text(" 피버: 쿨X 마나x3", NamedTextColor.GOLD));
+        return c;
     }
 
     // ------------------------------------------------------------------ 모드
@@ -129,11 +159,31 @@ public final class RodKit implements WeaponKit, Listener {
         return mode(ctx.player().getInventory().getItemInMainHand());
     }
 
-    /** 우: 모드 변경. */
+    /** 좌(허공/블록): 모드 변경. */
     @Override
-    public void onRightClick(SkillContext ctx) {
-        ctx.cancelVanilla();
+    public void onLeftClick(SkillContext ctx) {
+        if (!firstLeftThisTick(ctx.player())) return;
+        switchMode(ctx.player());
+    }
+
+    /** 좌(엔티티 타격): 평타 피해는 그대로, 모드 변경만. */
+    @Override
+    public void onMeleeHit(SkillContext ctx, LivingEntity target, EntityDamageByEntityEvent event) {
+        if (!firstLeftThisTick(ctx.player())) return;
         Player p = ctx.player();
+        // 타격 이벤트 처리 중에 주손 아이템을 바꾸지 않도록 다음 틱에 전환
+        Bukkit.getScheduler().runTask(ctx.plugin(), () -> {
+            if (p.isOnline()) switchMode(p);
+        });
+    }
+
+    private boolean firstLeftThisTick(Player p) {
+        int now = Bukkit.getCurrentTick();
+        Integer last = lastLeftTick.put(p.getUniqueId(), now);
+        return last == null || last != now;
+    }
+
+    private void switchMode(Player p) {
         ItemStack cur = p.getInventory().getItemInMainHand();
         if (!id().equals(Items.kitId(cur))) return;
         int next = (mode(cur) + 1) % 3;
@@ -161,6 +211,19 @@ public final class RodKit implements WeaponKit, Listener {
                 Title.Times.times(Duration.ZERO, Duration.ofMillis(700), Duration.ofMillis(200))));
     }
 
+    /**
+     * 쿨다운·마나 처리. 피버 중엔 쿨다운 없이 마나 3배 소모, 평소엔 슬롯 쿨다운 + 마나.
+     */
+    private boolean pay(SkillContext ctx, String slot, float mana, int cd) {
+        if (ctx.isFever()) {
+            return ctx.tryMana(Math.min(1f, mana * FEVER_MANA_MUL));
+        }
+        if (ctx.onCooldown(slot)) return false;
+        if (!ctx.tryMana(mana)) return false;
+        ctx.cooldowns().tryUse(ctx.player(), id(), slot, cd);
+        return true;
+    }
+
     private static Color modeColor(int mode) {
         return switch (mode) {
             case CARROT -> Color.fromRGB(255, 170, 40);
@@ -169,78 +232,51 @@ public final class RodKit implements WeaponKit, Listener {
         };
     }
 
-    // ------------------------------------------------------------------ 좌 (단일)
+    // ------------------------------------------------------------------ 우 (단일)
 
     @Override
-    public void onLeftClick(SkillContext ctx) {
-        if (!firstLeftThisTick(ctx.player())) return;
-        castSingle(ctx, null);
-    }
-
-    @Override
-    public void onMeleeHit(SkillContext ctx, LivingEntity target, EntityDamageByEntityEvent event) {
-        if (!firstLeftThisTick(ctx.player())) return;
-        castSingle(ctx, target);
-    }
-
-    private boolean firstLeftThisTick(Player p) {
-        int now = Bukkit.getCurrentTick();
-        Integer last = lastLeftTick.put(p.getUniqueId(), now);
-        return last == null || last != now;
-    }
-
-    private void castSingle(SkillContext ctx, LivingEntity hit) {
+    public void onRightClick(SkillContext ctx) {
+        ctx.cancelVanilla();
         Player p = ctx.player();
         int mode = mode(ctx);
-        if (ctx.onCooldown(Slot.LEFT)) return;
 
         if (mode == CARROT) {
-            Player ally = Targets.lookAlly(p, LEFT_RANGE);
+            Player ally = Targets.lookAlly(p, SINGLE_RANGE);
             if (ally == null) ally = p;
-            if (!ctx.tryMana(MANA_LEFT_CARROT)) return;
-            ctx.tryCooldown(Slot.LEFT, LEFT_CD);
-            int bonus = ctx.isFever() ? 40 : 0;
-            ally.addPotionEffect(new PotionEffect(PotionEffectType.SPEED, 120 + bonus, 1, false, true, true));
-            ally.addPotionEffect(new PotionEffect(PotionEffectType.REGENERATION, 80 + bonus, 1, false, true, true));
+            if (!pay(ctx, SLOT_SINGLE[CARROT], MANA_SINGLE_CARROT, CD_SINGLE_CARROT)) return;
+            ally.addPotionEffect(new PotionEffect(PotionEffectType.SPEED, 120, 1, false, true, true));
+            ally.addPotionEffect(new PotionEffect(PotionEffectType.REGENERATION, 100, 1, false, true, true));
             if (ally != p) dustLine(p.getEyeLocation().add(0, -0.3, 0), ally.getLocation().add(0, 1, 0),
                     Color.fromRGB(255, 170, 40), 0.35);
             ally.getWorld().spawnParticle(Particle.HAPPY_VILLAGER, ally.getLocation().add(0, 1, 0), 15, 0.4, 0.6, 0.4, 0);
+            ally.getWorld().spawnParticle(Particle.HEART, ally.getLocation().add(0, 1.8, 0), 3, 0.3, 0.2, 0.3, 0);
             Fx.sound(ally.getLocation(), Sound.BLOCK_AMETHYST_BLOCK_CHIME, 1f, 1.8f);
             return;
         }
 
-        LivingEntity target = hit != null && Targets.isEnemy(p, hit) ? hit : Targets.lookTarget(p, LEFT_RANGE);
+        LivingEntity target = Targets.lookTarget(p, SINGLE_RANGE);
         if (target == null) return;
 
         if (mode == BASIC) {
-            if (!ctx.tryMana(MANA_LEFT_BASIC)) return;
-            ctx.tryCooldown(Slot.LEFT, LEFT_CD + 5);
+            if (!pay(ctx, SLOT_SINGLE[BASIC], MANA_SINGLE_BASIC, CD_SINGLE_BASIC)) return;
             Location from = p.getEyeLocation().add(0, -0.3, 0);
             dustLine(from, target.getLocation().add(0, target.getHeight() * 0.6, 0), Color.fromRGB(220, 220, 220), 0.3);
             target.getWorld().spawnParticle(Particle.FISHING, target.getLocation().add(0, 1, 0), 10, 0.3, 0.4, 0.3, 0.02);
-            if (hit == null) {
-                // 허공 스윙: 약한 마법 피해 후 당기기 (피해 넉백 뒤에 속도 덮어쓰기)
-                Damage.magic(p, target, ctx.isFever() ? 3 : 2);
-                pullTo(p, target);
-            } else {
-                // 직접 타격: 평타 넉백이 끝난 다음 틱에 당기기 (타격 이벤트 안에서 중첩 피해 X)
-                LivingEntity t = target;
-                Bukkit.getScheduler().runTask(ctx.plugin(), () -> {
-                    if (t.isValid() && p.isOnline()) pullTo(p, t);
-                });
-            }
+            // 약한 마법 피해 후 당기기 (피해 넉백 뒤에 속도 덮어쓰기)
+            Damage.magic(p, target, 2);
+            pullTo(p, target);
             Fx.sound(p.getLocation(), Sound.ENTITY_FISHING_BOBBER_THROW, 0.9f, 0.8f);
             Fx.sound(target.getLocation(), Sound.ENTITY_FISHING_BOBBER_RETRIEVE, 1f, 0.9f);
         } else {
-            if (!ctx.tryMana(MANA_LEFT_FUNGUS)) return;
-            ctx.tryCooldown(Slot.LEFT, LEFT_CD);
-            int bonus = ctx.isFever() ? 30 : 0;
-            target.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 80 + bonus, 1, false, true, true));
-            target.addPotionEffect(new PotionEffect(PotionEffectType.WEAKNESS, 100 + bonus, 0, false, true, true));
+            if (!pay(ctx, SLOT_SINGLE[FUNGUS], MANA_SINGLE_FUNGUS, CD_SINGLE_FUNGUS)) return;
+            target.addPotionEffect(new PotionEffect(PotionEffectType.WEAKNESS, 100, 0, false, true, true));
+            target.addPotionEffect(new PotionEffect(PotionEffectType.WITHER, 100, 1, false, true, true));
             dustLine(p.getEyeLocation().add(0, -0.3, 0), target.getLocation().add(0, target.getHeight() * 0.6, 0),
                     Color.fromRGB(40, 200, 180), 0.35);
             target.getWorld().spawnParticle(Particle.SCULK_SOUL, target.getLocation().add(0, 1, 0), 8, 0.3, 0.5, 0.3, 0.01);
+            target.getWorld().spawnParticle(Particle.SMOKE, target.getLocation().add(0, 1, 0), 10, 0.3, 0.5, 0.3, 0.01);
             Fx.sound(target.getLocation(), Sound.ENTITY_ILLUSIONER_CAST_SPELL, 0.8f, 1.4f);
+            Fx.sound(target.getLocation(), Sound.ENTITY_WITHER_AMBIENT, 0.4f, 1.6f);
         }
     }
 
@@ -260,22 +296,18 @@ public final class RodKit implements WeaponKit, Listener {
         ctx.cancelVanilla();
         Player p = ctx.player();
         int mode = mode(ctx);
-        String slot = Slot.SHIFT_RIGHT;
-        if (ctx.onCooldown(slot)) return;
 
         switch (mode) {
             case BASIC -> {
-                if (!ctx.tryMana(MANA_AOE_BASIC)) return;
-                ctx.tryCooldown(slot, CD_AOE_BASIC);
-                fangLine(p, ctx.isFever() ? 8 : 6);
+                if (!pay(ctx, SLOT_AOE[BASIC], MANA_AOE_BASIC, CD_AOE_BASIC)) return;
+                fangLines(p, FANG_DMG);
             }
             case CARROT -> {
-                if (!ctx.tryMana(MANA_AOE_CARROT)) return;
-                ctx.tryCooldown(slot, CD_AOE_CARROT);
-                int dur = ctx.isFever() ? 200 : 160;
+                if (!pay(ctx, SLOT_AOE[CARROT], MANA_AOE_CARROT, CD_AOE_CARROT)) return;
+                int dur = 160;
                 for (Player a : Targets.alliesAround(p, p.getLocation(), 6)) {
                     a.addPotionEffect(new PotionEffect(PotionEffectType.STRENGTH, dur, 0, false, true, true));
-                    a.addPotionEffect(new PotionEffect(PotionEffectType.RESISTANCE, dur, 0, false, true, true));
+                    a.addPotionEffect(new PotionEffect(PotionEffectType.SATURATION, 20, 0, false, true, true));
                     a.getWorld().spawnParticle(Particle.DUST, a.getLocation().add(0, 1, 0), 20, 0.4, 0.7, 0.4, 0,
                             new Particle.DustOptions(Color.fromRGB(255, 170, 40), 1.3f));
                 }
@@ -283,34 +315,37 @@ public final class RodKit implements WeaponKit, Listener {
                 dustRing(c, 6, 48, Color.fromRGB(255, 200, 60));
                 dustRing(c, 3, 24, Color.fromRGB(255, 140, 40));
                 Fx.sound(c, Sound.BLOCK_BEACON_POWER_SELECT, 1f, 1.5f);
+                Fx.sound(c, Sound.ENTITY_GENERIC_EAT, 0.8f, 1.2f);
                 Fx.sound(c, Sound.ENTITY_EVOKER_CAST_SPELL, 0.8f, 1.3f);
             }
             default -> {
-                if (!ctx.tryMana(MANA_AOE_FUNGUS)) return;
-                ctx.tryCooldown(slot, CD_AOE_FUNGUS);
-                debuffZone(p, sightPoint(p, 15), ctx.isFever() ? 4.5 : 3.5, ctx.isFever() ? 160 : 120);
+                if (!pay(ctx, SLOT_AOE[FUNGUS], MANA_AOE_FUNGUS, CD_AOE_FUNGUS)) return;
+                debuffZone(p, sightPoint(p, 15), ZONE_RADIUS, ZONE_TICKS);
             }
         }
     }
 
-    /** 기본 ⇧우: 전방 일렬 송곳니. */
-    private void fangLine(Player p, double dmg) {
+    /** 기본 ⇧우: 전방으로 나란히 두 줄 송곳니. */
+    private void fangLines(Player p, double dmg) {
         Vector dir = p.getLocation().getDirection().setY(0);
         if (dir.lengthSquared() < 1e-6) dir = new Vector(0, 0, 1);
         dir.normalize();
+        Vector side = new Vector(-dir.getZ(), 0, dir.getX()).multiply(0.9);
         Location base = p.getLocation();
         for (int i = 0; i < 10; i++) {
             Location at = base.clone().add(dir.clone().multiply(1.5 + i * 1.2));
-            spawnFang(p, at, i * 2, dmg);
+            spawnFang(p, at.clone().add(side), i * 2, dmg);
+            spawnFang(p, at.clone().subtract(side), i * 2, dmg);
         }
         Fx.sound(base, Sound.ENTITY_EVOKER_CAST_SPELL, 1f, 1f);
         Fx.sound(base, Sound.ENTITY_EVOKER_PREPARE_ATTACK, 0.8f, 1.2f);
         p.getWorld().spawnParticle(Particle.WITCH, p.getLocation().add(0, 1.2, 0), 15, 0.4, 0.4, 0.4, 0.05);
     }
 
-    /** 균 ⇧우: 어둠 + 발광 장판. */
+    /** 균 ⇧우: 어둠 + 발광 장판, 들어온 적에게 구속 II 6초 (적마다 1회). */
     private void debuffZone(Player p, Location center, double radius, int duration) {
         UUID id = p.getUniqueId();
+        Set<UUID> slowed = new HashSet<>();
         Fx.sound(center, Sound.BLOCK_SCULK_CATALYST_BLOOM, 1.2f, 0.8f);
         Fx.sound(p.getLocation(), Sound.ENTITY_ILLUSIONER_PREPARE_BLINDNESS, 0.8f, 1.1f);
         final BukkitTask[] holder = new BukkitTask[1];
@@ -325,11 +360,11 @@ public final class RodKit implements WeaponKit, Listener {
                     return;
                 }
                 if (t % 5 == 0) {
-                    dustRing(center, radius, 40, Color.fromRGB(30, 170, 160));
-                    dustRing(center, radius * 0.55, 20, Color.fromRGB(20, 60, 80));
-                    center.getWorld().spawnParticle(Particle.SQUID_INK, center.clone().add(0, 0.3, 0), 6,
+                    dustRing(center, radius, 60, Color.fromRGB(30, 170, 160));
+                    dustRing(center, radius * 0.55, 30, Color.fromRGB(20, 60, 80));
+                    center.getWorld().spawnParticle(Particle.SQUID_INK, center.clone().add(0, 0.3, 0), 10,
                             radius * 0.4, 0.1, radius * 0.4, 0.01);
-                    center.getWorld().spawnParticle(Particle.SCULK_SOUL, center.clone().add(0, 0.3, 0), 2,
+                    center.getWorld().spawnParticle(Particle.SCULK_SOUL, center.clone().add(0, 0.3, 0), 3,
                             radius * 0.4, 0.2, radius * 0.4, 0.01);
                 }
                 if (t % 10 == 0) {
@@ -337,6 +372,9 @@ public final class RodKit implements WeaponKit, Listener {
                         if (Math.abs(e.getLocation().getY() - center.getY()) > 3) continue;
                         e.addPotionEffect(new PotionEffect(PotionEffectType.DARKNESS, 60, 0, false, true, true));
                         e.addPotionEffect(new PotionEffect(PotionEffectType.GLOWING, 60, 0, false, false, true));
+                        if (slowed.add(e.getUniqueId())) {
+                            e.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 120, 1, false, true, true));
+                        }
                     }
                 }
                 t++;
@@ -355,14 +393,27 @@ public final class RodKit implements WeaponKit, Listener {
         if (dir.lengthSquared() < 1e-6) dir = new Vector(0, 0, 1);
         dir.normalize();
         Location center = ground(p.getLocation().add(dir.multiply(5)));
+        World w = center.getWorld();
 
-        List<LivingEntity> victims = Targets.enemiesAround(p, p.getLocation(), 8);
-        for (LivingEntity e : Targets.enemiesAround(p, center, 6)) if (!victims.contains(e)) victims.add(e);
+        List<LivingEntity> victims = Targets.enemiesAround(p, center, ULT_RADIUS);
+        for (LivingEntity e : Targets.enemiesAround(p, p.getLocation(), ULT_RADIUS)) {
+            if (!victims.contains(e)) victims.add(e);
+        }
+        // 발동 즉시 피해
+        for (LivingEntity e : victims) {
+            Damage.magic(p, e, ULT_INSTANT_DMG);
+            w.spawnParticle(Particle.WITCH, e.getLocation().add(0, 1, 0), 8, 0.3, 0.5, 0.3, 0.05);
+        }
 
         Fx.sound(p.getLocation(), Sound.ENTITY_EVOKER_PREPARE_SUMMON, 1.2f, 0.8f);
         Fx.sound(center, Sound.ENTITY_ILLUSIONER_CAST_SPELL, 1.2f, 0.7f);
+        Fx.sound(center, Sound.ENTITY_BREEZE_WIND_BURST, 1f, 0.6f);
 
         final int gatherTicks = 16;
+        final int rings = 7;          // 반경 6 → 0
+        final int ringGap = 4;        // 틱
+        final int fangEnd = gatherTicks + rings * ringGap + 6;
+        final int pillarTicks = 14;
         final BukkitTask[] holder = new BukkitTask[1];
         holder[0] = Bukkit.getScheduler().runTaskTimer(DeruyRPG.get(), new Runnable() {
             int t = 0;
@@ -374,17 +425,13 @@ public final class RodKit implements WeaponKit, Listener {
                     untrack(id, holder[0]);
                     return;
                 }
+                // 휘감는 나선 소용돌이 (전체 지속)
+                if (t < fangEnd) vortex(center, t, t < gatherTicks
+                        ? ULT_RADIUS * (1 - t / (double) gatherTicks * 0.5)
+                        : ULT_RADIUS * 0.5 * (1 - (t - gatherTicks) / (double) (fangEnd - gatherTicks)) + 0.4);
+
                 if (t < gatherTicks) {
-                    // 끌어모으기 + 소용돌이 파티클
-                    double r = 7.0 * (1 - t / (double) gatherTicks) + 0.5;
-                    for (int i = 0; i < RAINBOW.length; i++) {
-                        double a = t * 0.45 + Math.PI * 2 * i / RAINBOW.length;
-                        Location l = center.clone().add(Math.cos(a) * r, 0.3 + t * 0.12, Math.sin(a) * r);
-                        center.getWorld().spawnParticle(Particle.DUST, l, 2, 0.05, 0.05, 0.05, 0,
-                                new Particle.DustOptions(RAINBOW[i], 1.6f));
-                    }
-                    center.getWorld().spawnParticle(Particle.WITCH, center.clone().add(0, 1, 0), 6, 0.6, 0.8, 0.6, 0.05);
-                    center.getWorld().spawnParticle(Particle.ENCHANT, center.clone().add(0, 1.5, 0), 12, 1, 1, 1, 1);
+                    // 끌어모으기
                     if (t % 2 == 0) {
                         for (LivingEntity e : victims) {
                             if (!e.isValid() || e.getWorld() != center.getWorld()) continue;
@@ -394,56 +441,107 @@ public final class RodKit implements WeaponKit, Listener {
                                 e.setVelocity(new Vector(0, e.getVelocity().getY(), 0));
                                 continue;
                             }
-                            e.setVelocity(v.normalize().multiply(Math.min(1.3, 0.25 + d * 0.22)).setY(0.12));
+                            // 접선 성분을 섞어 휘감기는 느낌
+                            Vector tan = new Vector(-v.getZ(), 0, v.getX()).normalize().multiply(0.25);
+                            e.setVelocity(v.normalize().multiply(Math.min(1.2, 0.25 + d * 0.2)).add(tan).setY(0.12));
                         }
                     }
                     if (t % 4 == 0) Fx.sound(center, Sound.BLOCK_ENCHANTMENT_TABLE_USE, 1f, 0.6f + t * 0.06f);
-                } else if (t == gatherTicks) {
-                    detonate(p, center, ctx.isFever());
-                } else {
+                } else if (t < gatherTicks + rings * ringGap) {
+                    // 바깥 원부터 안쪽으로 조여오는 송곳니
+                    int k = t - gatherTicks;
+                    if (k % ringGap == 0) {
+                        int ring = k / ringGap;                 // 0..6
+                        double r = ULT_RADIUS - ring;           // 6..0
+                        fangRing(p, center, r);
+                        Fx.sound(center, Sound.ENTITY_EVOKER_FANGS_ATTACK, 1f, 0.7f + ring * 0.1f);
+                    }
+                } else if (t == fangEnd) {
+                    finish(p, center);
+                } else if (t > fangEnd + pillarTicks) {
                     holder[0].cancel();
                     untrack(id, holder[0]);
                     return;
                 }
+                if (t > fangEnd) pillar(center, t - fangEnd);
                 t++;
             }
         }, 0L, 1L);
         track(id, holder[0]);
     }
 
-    private void detonate(Player p, Location center, boolean fever) {
+    /** 나선형 소용돌이: 여러 갈래가 회전하며 위로 감겨 올라감. */
+    private void vortex(Location center, int t, double r) {
         World w = center.getWorld();
-        double dmg = 7;
-        spawnFang(p, center, 0, dmg);
-        for (int i = 0; i < 6; i++) {
-            double a = Math.PI * 2 * i / 6;
-            spawnFang(p, center.clone().add(Math.cos(a) * 1.3, 0, Math.sin(a) * 1.3), 2, dmg);
+        int arms = RAINBOW.length;
+        for (int i = 0; i < arms; i++) {
+            for (int h = 0; h < 4; h++) {
+                double y = 0.2 + h * 0.7;
+                double rr = r * (1 - h * 0.15);
+                double a = t * 0.5 + Math.PI * 2 * i / arms + h * 0.6;
+                Location l = center.clone().add(Math.cos(a) * rr, y, Math.sin(a) * rr);
+                w.spawnParticle(Particle.DUST, l, 1, 0.03, 0.03, 0.03, 0,
+                        new Particle.DustOptions(RAINBOW[i], 1.4f));
+            }
         }
-        for (int i = 0; i < 11; i++) {
-            double a = Math.PI * 2 * i / 11 + 0.3;
-            spawnFang(p, center.clone().add(Math.cos(a) * 2.6, 0, Math.sin(a) * 2.6), 4, dmg);
+        if (t % 2 == 0) {
+            w.spawnParticle(Particle.WITCH, center.clone().add(0, 1, 0), 6, r * 0.3, 0.8, r * 0.3, 0.05);
+            w.spawnParticle(Particle.ENCHANT, center.clone().add(0, 1.5, 0), 12, 1, 1, 1, 1);
+            w.spawnParticle(Particle.REVERSE_PORTAL, center.clone().add(0, 0.5, 0), 6, r * 0.4, 0.2, r * 0.4, 0.02);
         }
+    }
 
-        int mul = fever ? 1 : 0;
-        for (LivingEntity e : Targets.enemiesAround(p, center, 4)) {
+    private void fangRing(Player p, Location center, double r) {
+        if (r < 0.5) {
+            spawnFang(p, center, 0, ULT_FANG_DMG);
+            return;
+        }
+        int n = Math.max(6, (int) Math.round(Math.PI * 2 * r / 1.3));
+        double off = r * 0.4;
+        for (int i = 0; i < n; i++) {
+            double a = Math.PI * 2 * i / n + off;
+            spawnFang(p, center.clone().add(Math.cos(a) * r, 0, Math.sin(a) * r), 0, ULT_FANG_DMG);
+        }
+        dustRing(center, r, n * 2, RAINBOW[(int) Math.round(r) % RAINBOW.length]);
+    }
+
+    /** 마지막: 디버프 + 중심에서 솟아오르는 기둥. */
+    private void finish(Player p, Location center) {
+        World w = center.getWorld();
+        for (LivingEntity e : Targets.enemiesAround(p, center, ULT_RADIUS)) {
             e.addPotionEffect(new PotionEffect(PotionEffectType.WITHER, 100, 1, false, true, true));
             e.addPotionEffect(new PotionEffect(PotionEffectType.POISON, 100, 1, false, true, true));
-            e.addPotionEffect(new PotionEffect(PotionEffectType.WEAKNESS, 160, mul, false, true, true));
-        }
-
-        for (Color c : RAINBOW) {
-            w.spawnParticle(Particle.DUST, center.clone().add(0, 1, 0), 25, 1.8, 1.0, 1.8, 0,
-                    new Particle.DustOptions(c, 1.8f));
+            e.addPotionEffect(new PotionEffect(PotionEffectType.WEAKNESS, 160, 0, false, true, true));
         }
         for (int i = 0; i < RAINBOW.length; i++) {
-            dustRing(center, 1.0 + i * 0.5, 16 + i * 4, RAINBOW[i]);
+            dustRing(center, 1.0 + i * 0.75, 16 + i * 5, RAINBOW[i]);
         }
         w.spawnParticle(Particle.WITCH, center.clone().add(0, 1, 0), 60, 1.5, 1, 1.5, 0.2);
         w.spawnParticle(Particle.END_ROD, center.clone().add(0, 1, 0), 30, 0.2, 0.2, 0.2, 0.25);
-        w.spawnParticle(Particle.REVERSE_PORTAL, center.clone().add(0, 1, 0), 60, 1.5, 1, 1.5, 0.1);
-        Fx.sound(center, Sound.ENTITY_EVOKER_FANGS_ATTACK, 1.5f, 0.8f);
+        w.spawnParticle(Particle.FLASH, center.clone().add(0, 1, 0), 1, 0, 0, 0, 0, Color.WHITE);
         Fx.sound(center, Sound.ENTITY_ILLUSIONER_CAST_SPELL, 1.5f, 0.5f);
         Fx.sound(center, Sound.BLOCK_AMETHYST_BLOCK_CHIME, 1.5f, 0.6f);
+        Fx.sound(center, Sound.ENTITY_FIREWORK_ROCKET_LAUNCH, 1.5f, 0.6f);
+        Fx.sound(center, Sound.BLOCK_BEACON_POWER_SELECT, 1.2f, 0.7f);
+        Fx.sound(center, Sound.ENTITY_EVOKER_CAST_SPELL, 1.2f, 0.6f);
+    }
+
+    /** 중심에서 위로 솟구치는 기둥 (k = 경과 틱). */
+    private void pillar(Location center, int k) {
+        World w = center.getWorld();
+        double top = Math.min(12, k * 1.2);
+        for (double y = 0; y <= top; y += 0.4) {
+            double a = y * 1.3 + k * 0.4;
+            double r = 0.5 + 0.15 * Math.sin(y);
+            Color c = RAINBOW[(int) (y * 2) % RAINBOW.length];
+            w.spawnParticle(Particle.DUST, center.clone().add(Math.cos(a) * r, y, Math.sin(a) * r), 1, 0, 0, 0, 0,
+                    new Particle.DustOptions(c, 1.3f));
+            w.spawnParticle(Particle.DUST, center.clone().add(-Math.cos(a) * r, y, -Math.sin(a) * r), 1, 0, 0, 0, 0,
+                    new Particle.DustOptions(c, 1.3f));
+        }
+        w.spawnParticle(Particle.END_ROD, center.clone().add(0, top, 0), 4, 0.15, 0.2, 0.15, 0.05);
+        w.spawnParticle(Particle.WITCH, center.clone().add(0, top * 0.5, 0), 4, 0.3, top * 0.3, 0.3, 0.02);
+        if (k == 1) Fx.sound(center, Sound.ENTITY_BREEZE_WIND_BURST, 1.3f, 1.2f);
     }
 
     // ------------------------------------------------------------------ 송곳니
