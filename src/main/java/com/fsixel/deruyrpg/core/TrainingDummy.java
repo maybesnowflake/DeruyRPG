@@ -10,7 +10,7 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.entity.Display;
 import org.bukkit.entity.Entity;
-import org.bukkit.entity.Husk;
+import org.bukkit.entity.Mannequin;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.TextDisplay;
 import org.bukkit.event.EventHandler;
@@ -65,20 +65,19 @@ public final class TrainingDummy implements Listener {
     }
 
     public LivingEntity spawn(Location loc) {
-        return loc.getWorld().spawn(loc, Husk.class, h -> {
+        // 마네킹(플레이어형): 평화로움 난이도에서도 사라지지 않고, 넉백·띄우기는 받음
+        return loc.getWorld().spawn(loc, Mannequin.class, h -> {
             h.getPersistentDataContainer().set(KEY, PersistentDataType.BYTE, (byte) 1);
-            h.setAware(false);
+            h.setImmovable(false);
             h.setSilent(true);
             h.setPersistent(true);
             h.setRemoveWhenFarAway(false);
-            h.setCanPickupItems(false);
-            h.setShouldBurnInDay(false);
-            h.setAdult();
             var maxHp = h.getAttribute(Attribute.MAX_HEALTH);
             if (maxHp != null) maxHp.setBaseValue(MAX_HP);
             h.setHealth(MAX_HP);
             h.getEquipment().setHelmet(new ItemStack(org.bukkit.Material.TARGET));
             h.getEquipment().setHelmetDropChance(0f);
+            h.setDescription(Component.text("훈련봇", NamedTextColor.GRAY));
             h.setCustomNameVisible(true);
             updateName(h, 0);
         });
@@ -108,6 +107,7 @@ public final class TrainingDummy implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onDamage(EntityDamageEvent e) {
+        if (com.fsixel.deruyrpg.util.Damage.isProbe()) return;
         if (!(e.getEntity() instanceof LivingEntity le) || !isDummy(le)) return;
         double dmg = e.getFinalDamage();
         if (dmg <= 0) return;

@@ -80,6 +80,15 @@ public final class Cc {
         removeMod(e, Attribute.JUMP_STRENGTH, STUN_JUMP);
     }
 
+    /** 플러그인 종료 시: 걸려 있는 기절 전부 해제. */
+    public static void unstunAll() {
+        for (UUID id : java.util.List.copyOf(stunUntil.keySet())) {
+            org.bukkit.entity.Entity e = Bukkit.getEntity(id);
+            if (e instanceof LivingEntity le) unstun(le);
+        }
+        stunUntil.clear();
+    }
+
     /** 모든 CC 제거. */
     public static void cleanse(LivingEntity e) {
         for (PotionEffectType t : CC_EFFECTS) e.removePotionEffect(t);

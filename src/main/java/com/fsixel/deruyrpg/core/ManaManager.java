@@ -78,8 +78,8 @@ public final class ManaManager {
     public boolean tryConsume(Player p, float amount) {
         float cur = get(p);
         if (cur < amount) {
-            p.sendActionBar(net.kyori.adventure.text.Component.text("마나 부족",
-                    net.kyori.adventure.text.format.NamedTextColor.AQUA));
+            HudTask.flash(p, net.kyori.adventure.text.Component.text("마나 부족",
+                    net.kyori.adventure.text.format.NamedTextColor.AQUA), 20);
             return false;
         }
         set(p, cur - amount);

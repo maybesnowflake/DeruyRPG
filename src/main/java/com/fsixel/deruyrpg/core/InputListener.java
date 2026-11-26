@@ -21,7 +21,6 @@ import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
-import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.inventory.EquipmentSlot;
@@ -70,9 +69,13 @@ public final class InputListener implements Listener {
         if (kit == null) return;
 
         Action a = e.getAction();
+        if (a == Action.RIGHT_CLICK_BLOCK && !p.isSneaking()
+                && e.getClickedBlock() != null && e.getClickedBlock().getType().isInteractable()) {
+            return; // 상자·문·작업대 등은 바닐라 상호작용 우선 (웅크리면 스킬)
+        }
         if (a == Action.RIGHT_CLICK_AIR || a == Action.RIGHT_CLICK_BLOCK) {
             fireRight(p, item, kit, e);
-        } else if (a == Action.LEFT_CLICK_AIR || a == Action.LEFT_CLICK_BLOCK) {
+        } else if (a == Action.LEFT_CLICK_AIR) { // 블록 좌클릭(채굴)은 스킬 안 씀
             Integer drop = lastDropTick.get(p.getUniqueId());
             if (drop != null && drop >= Bukkit.getCurrentTick() - 1) return;
             kit.onLeftClick(ctx(p, item, kit, e));
@@ -86,7 +89,17 @@ public final class InputListener implements Listener {
         ItemStack item = p.getInventory().getItemInMainHand();
         WeaponKit kit = plugin.kits().find(item);
         if (kit == null) return;
+        if (!p.isSneaking() && isInteractableEntity(e.getRightClicked())) return; // 주민·액자·탈것·보관함 등
         fireRight(p, item, kit, e);
+    }
+
+    private static boolean isInteractableEntity(org.bukkit.entity.Entity en) {
+        return en instanceof org.bukkit.inventory.Merchant
+                || en instanceof org.bukkit.entity.Hanging
+                || en instanceof org.bukkit.entity.Vehicle
+                || en instanceof org.bukkit.entity.ArmorStand
+                || en instanceof org.bukkit.inventory.InventoryHolder
+                || en instanceof org.bukkit.entity.Tameable t && t.isTamed();
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -97,6 +110,7 @@ public final class InputListener implements Listener {
     /** 근접 평타 + 피버 게이지 (때림). */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onDealDamage(EntityDamageByEntityEvent e) {
+        if (Damage.isProbe()) return;
         if (!(e.getEntity() instanceof LivingEntity target)) return;
 
         Player attacker = null;
@@ -117,13 +131,22 @@ public final class InputListener implements Listener {
             kit.onMeleeHit(ctx(attacker, item, kit, e), target, e);
         }
         if (!e.isCancelled() && e.getFinalDamage() > 0) {
-            plugin.fever().onHit(attacker);
+            if (melee) Damage.recordMelee(target);
+            if (Damage.isSkillDamage()) plugin.fever().onSkillHit(attacker);
+            else plugin.fever().onHit(attacker);
         }
+    }
+
+    /** 스킬 피해가 실제로 들어갔는지 Damage 에 알려줌. */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onSkillDamagePassed(EntityDamageEvent e) {
+        if (Damage.isSkillDamage() && !Damage.isProbe()) Damage.markPassed();
     }
 
     /** 피격 시 무기 훅 (방패/토템 등). */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onTakeDamage(EntityDamageEvent e) {
+        if (Damage.isProbe()) return;
         if (!(e.getEntity() instanceof Player p)) return;
         ItemStack item = p.getInventory().getItemInMainHand();
         WeaponKit kit = plugin.kits().find(item);
@@ -134,6 +157,7 @@ public final class InputListener implements Listener {
     /** 피버 게이지 (맞음). */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onTakeDamageMonitor(EntityDamageEvent e) {
+        if (Damage.isProbe()) return;
         if (!(e.getEntity() instanceof Player p)) return;
         if (e.getFinalDamage() <= 0) return;
         if (plugin.kits().find(p.getInventory().getItemInMainHand()) == null) return;
@@ -151,38 +175,25 @@ public final class InputListener implements Listener {
 
         FeverManager fever = plugin.fever();
         if (fever.isFever(p)) {
-            p.sendActionBar(Component.text("이미 피버 중", NamedTextColor.GOLD));
+            HudTask.flash(p, Component.text("이미 피버 중", NamedTextColor.GOLD), 30);
             return;
         }
         if (!fever.isFull(p)) {
             p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.6f, 0.6f);
-            p.sendActionBar(Component.text("궁극기 게이지 부족 (" + (int) fever.get(p) + "%)", NamedTextColor.GRAY));
+            HudTask.flash(p, Component.text("궁극기 게이지 부족 (" + (int) fever.get(p) + "%)", NamedTextColor.GRAY), 30);
             return;
         }
-        fever.consume(p, kit.feverDurationTicks());
+        fever.consume(p, kit.feverDurationTicks(), kit.id());
         p.playSound(p.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 0.6f, 1.6f);
         kit.onUltimate(ctx(p, item, kit, e));
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onHeld(PlayerItemHeldEvent e) {
-        Player p = e.getPlayer();
-        ItemStack prev = p.getInventory().getItem(e.getPreviousSlot());
-        WeaponKit prevKit = plugin.kits().find(prev);
-        if (prevKit == null) return;
-        prevKit.onUnequip(p);
-        if (prevKit.usesMana()) plugin.mana().restoreDisplay(p);
-    }
-
+    /** 접속 종료: 무기 정리만. 쿨다운·피버 게이지·마나는 유지 (재접속 쿨 초기화 악용 방지). */
     @EventHandler
     public void onQuit(PlayerQuitEvent e) {
         Player p = e.getPlayer();
-        WeaponKit kit = plugin.kits().find(p.getInventory().getItemInMainHand());
-        if (kit != null) kit.onUnequip(p);
+        plugin.hud().forget(p);
         lastRightTick.remove(p.getUniqueId());
         lastDropTick.remove(p.getUniqueId());
-        plugin.cooldowns().clear(p);
-        plugin.fever().clear(p);
-        plugin.mana().clear(p);
     }
 }

@@ -38,7 +38,9 @@ public final class Targets {
     public static boolean isAlly(Player self, Entity other) {
         if (other.equals(self)) return true;
         if (!(other instanceof Player op)) return false;
-        Team team = self.getScoreboard().getEntryTeam(self.getName());
+        // 메인 스코어보드(/team) 기준 — TAB 같은 플러그인이 개인 스코어보드를 줘도 팀 판정 유지
+        Team team = org.bukkit.Bukkit.getScoreboardManager().getMainScoreboard().getEntryTeam(self.getName());
+        if (team == null) team = self.getScoreboard().getEntryTeam(self.getName());
         return team != null && team.hasEntry(op.getName());
     }
 

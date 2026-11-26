@@ -22,6 +22,11 @@ public final class FeverManager {
 
     private final Map<UUID, Double> gauge = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> feverUntil = new ConcurrentHashMap<>();
+    /** 피버를 시작한 무기 id — 피버 효과는 이 무기에만 적용 */
+    private final Map<UUID, String> feverKit = new ConcurrentHashMap<>();
+    /** 스킬 피해로 게이지 얻은 마지막 틱 (스킬 다단히트·광역·도트로 게이지가 폭주하지 않게) */
+    private final Map<UUID, Integer> lastSkillGain = new ConcurrentHashMap<>();
+    private static final int SKILL_GAIN_INTERVAL = 10;
 
     private double gainOnHit = 5.0;
     private double gainOnHurt = 2.0;
@@ -55,18 +60,43 @@ public final class FeverManager {
 
     public void onHit(Player p) { add(p, gainOnHit); }
 
+    /** 스킬 피해: 0.5초에 한 번만 게이지 증가 (맞은 적 수·타수와 무관). */
+    public void onSkillHit(Player p) {
+        int now = Bukkit.getCurrentTick();
+        Integer last = lastSkillGain.get(p.getUniqueId());
+        if (last != null && now - last < SKILL_GAIN_INTERVAL) return;
+        lastSkillGain.put(p.getUniqueId(), now);
+        add(p, gainOnHit);
+    }
+
     public void onHurt(Player p) { add(p, gainOnHurt); }
 
     public void set(Player p, double value) {
         gauge.put(p.getUniqueId(), Math.max(0, Math.min(MAX, value)));
     }
 
-    /** 게이지를 비우고 피버 시작. */
+    /** 게이지를 비우고 피버 시작 (무기 미지정). */
+    public void consume(Player p, int durationTicks, String kitId) {
+        feverKit.put(p.getUniqueId(), kitId);
+        consume(p, durationTicks);
+    }
+
+    /** 이 무기로 시작한 피버가 진행 중인지 (무기별 피버 효과 판정용). */
+    public boolean isFever(Player p, String kitId) {
+        return isFever(p) && kitId.equals(feverKit.get(p.getUniqueId()));
+    }
+
+    /** 진행 중인 피버를 시작한 무기 id (없으면 null). */
+    public String feverKit(Player p) {
+        return isFever(p) ? feverKit.get(p.getUniqueId()) : null;
+    }
+
     public void consume(Player p, int durationTicks) {
         gauge.put(p.getUniqueId(), 0.0);
         feverUntil.put(p.getUniqueId(), Bukkit.getCurrentTick() + durationTicks);
     }
 
+    /** 어떤 무기든 피버 진행 중인지. 무기 효과 판정에는 isFever(p, kitId) / ctx.isFever() 를 쓸 것. */
     public boolean isFever(Player p) {
         Integer end = feverUntil.get(p.getUniqueId());
         return end != null && end > Bukkit.getCurrentTick();
@@ -84,5 +114,7 @@ public final class FeverManager {
     public void clear(Player p) {
         gauge.remove(p.getUniqueId());
         feverUntil.remove(p.getUniqueId());
+        feverKit.remove(p.getUniqueId());
+        lastSkillGain.remove(p.getUniqueId());
     }
 }

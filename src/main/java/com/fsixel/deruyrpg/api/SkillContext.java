@@ -63,7 +63,13 @@ public final class SkillContext {
     // ---- 피버 ----
     public FeverManager fever() { return plugin.fever(); }
 
-    public boolean isFever() { return plugin.fever().isFever(player); }
+    /** 이 무기로 시작한 피버가 진행 중인지 (다른 무기 궁극기의 피버는 false). */
+    public boolean isFever() { return plugin.fever().isFever(player, kit.id()); }
+
+    /** 액션바에 잠깐(기본 1.5초) 메시지 표시 — 코어 HUD가 덮어쓰지 않음. p.sendActionBar 대신 이걸 쓸 것. */
+    public void flash(net.kyori.adventure.text.Component message) {
+        com.fsixel.deruyrpg.core.HudTask.flash(player, message, 30);
+    }
 
     // ---- 마나 ----
     public ManaManager mana() { return plugin.mana(); }
