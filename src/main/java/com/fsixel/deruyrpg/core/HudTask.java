@@ -44,7 +44,7 @@ public final class HudTask extends BukkitRunnable {
 
             if (kit.usesMana()) plugin.mana().display(p);
             updateGlint(p, item);
-            p.sendActionBar(actionBar(p, kit));
+            p.sendActionBar(actionBar(p, kit, new SkillContext(plugin, p, item, kit, null)));
         }
     }
 
@@ -59,7 +59,7 @@ public final class HudTask extends BukkitRunnable {
         }
     }
 
-    private Component actionBar(Player p, WeaponKit kit) {
+    private Component actionBar(Player p, WeaponKit kit, SkillContext ctx) {
         FeverManager fever = plugin.fever();
         TextComponent.Builder b = Component.text();
 
@@ -73,11 +73,17 @@ public final class HudTask extends BukkitRunnable {
             b.append(Component.text("▯".repeat(BAR_CELLS - filled), NamedTextColor.DARK_GRAY));
         }
 
-        for (String slot : kit.cooldownSlots()) {
+        for (String slot : kit.cooldownSlots(p)) {
             int rem = plugin.cooldowns().remaining(p, kit.id(), slot);
             b.append(Component.text("   " + slot + " ", NamedTextColor.WHITE));
             if (rem > 0) b.append(Component.text(fmt(rem), NamedTextColor.RED));
             else b.append(Component.text("✔", NamedTextColor.GREEN));
+        }
+        try {
+            Component extra = kit.hudExtra(ctx);
+            if (extra != null) b.append(Component.text("   ")).append(extra);
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[" + kit.id() + "] HUD 오류: " + t);
         }
         return b.build();
     }

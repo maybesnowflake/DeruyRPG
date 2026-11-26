@@ -19,4 +19,4 @@ Paper 26.2 / Java 25 / Maven. 바닐라 무기 기반 RPG 스킬 플러그인.
 8. 끝나면 `JAVA_HOME=<jdk25> mvn -q package` 통과 확인 후 푸시 → PR.
 
 ## 테스트 명령어
-`/rpg give <무기|all>`, `/rpg fever` (게이지 가득), `/rpg mana`, `/rpg reset` (쿨다운 초기화)
+`/rpg give <무기|all>`, `/rpg fever` (게이지 가득), `/rpg mana`, `/rpg reset` (쿨다운 초기화), `/rpg dummy [clear]` (훈련봇)

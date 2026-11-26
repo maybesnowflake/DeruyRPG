@@ -7,6 +7,7 @@ import com.fsixel.deruyrpg.core.HudTask;
 import com.fsixel.deruyrpg.core.InputListener;
 import com.fsixel.deruyrpg.core.KitRegistry;
 import com.fsixel.deruyrpg.core.ManaManager;
+import com.fsixel.deruyrpg.core.TrainingDummy;
 import com.fsixel.deruyrpg.weapons.axe.AxeKit;
 import com.fsixel.deruyrpg.weapons.bow.BowKit;
 import com.fsixel.deruyrpg.weapons.crossbow.CrossbowKit;
@@ -27,6 +28,7 @@ public final class DeruyRPG extends JavaPlugin {
     private Cooldowns cooldowns;
     private FeverManager fever;
     private ManaManager mana;
+    private TrainingDummy dummy;
 
     public static DeruyRPG get() {
         return instance;
@@ -56,6 +58,8 @@ public final class DeruyRPG extends JavaPlugin {
         kits.register(new RodKit());
 
         getServer().getPluginManager().registerEvents(new InputListener(this), this);
+        dummy = new TrainingDummy(this);
+        getServer().getPluginManager().registerEvents(dummy, this);
         new HudTask(this).runTaskTimer(this, HudTask.PERIOD, HudTask.PERIOD);
 
         PluginCommand cmd = getCommand("rpg");
@@ -71,4 +75,5 @@ public final class DeruyRPG extends JavaPlugin {
     public Cooldowns cooldowns() { return cooldowns; }
     public FeverManager fever() { return fever; }
     public ManaManager mana() { return mana; }
+    public TrainingDummy dummy() { return dummy; }
 }
