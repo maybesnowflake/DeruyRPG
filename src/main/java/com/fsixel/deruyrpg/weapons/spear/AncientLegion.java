@@ -7,6 +7,7 @@ import com.fsixel.deruyrpg.util.Targets;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Color;
+import org.bukkit.Difficulty;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.Particle;
@@ -17,6 +18,7 @@ import org.bukkit.block.data.BlockData;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Husk;
+import org.bukkit.entity.Mannequin;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.EntityEquipment;
 import org.bukkit.inventory.ItemStack;
@@ -24,15 +26,18 @@ import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 import java.util.UUID;
 
 /**
  * F 고대 군단 (아지르 궁극기 느낌).
  * 플레이어 양옆으로 병사(사막 미라 허스크 + 창) 6명이 일렬로 서서 앞으로 돌진,
  * 경로의 적을 밀쳐내며 피해 → 멈춘 뒤 각자 작은 창 연속 찌르기(플레이어 우클릭과 같은 연출) → 모래 먼지와 함께 사라짐.
+ *
+ * 궁극기라 무기를 놓아도(onUnequip) 끊기지 않고 자체 타이머로 끝까지 진행. 접속 종료·사망 때만 즉시 정리.
+ * 평화로움 난이도에선 허스크가 바로 사라지므로 마네킹(Mannequin)으로 대신 소환.
  */
 final class AncientLegion {
 
@@ -53,8 +58,9 @@ final class AncientLegion {
     private final SpearKit kit;
     private final SkillContext ctx;
     private final Player owner;
-    private final List<Husk> soldiers = new ArrayList<>();
-    private final Set<UUID> chargeHit = new HashSet<>();
+    private final List<LivingEntity> soldiers = new ArrayList<>();
+    /** 돌진에 맞은 적 → 피해가 실제로 들어갔는지 (안 들어갔으면 밀쳐내지 않음) */
+    private final Map<UUID, Boolean> chargeHit = new HashMap<>();
     private Vector forward;
     private BukkitTask task;
     private int jabCount = 0;
@@ -73,7 +79,7 @@ final class AncientLegion {
         Vector right = new Vector(-forward.getZ(), 0, forward.getX());
         float yaw = base.getYaw();
 
-        owner.sendActionBar(Component.text("고대 군단!", NamedTextColor.GOLD));
+        ctx.flash(Component.text("고대 군단!", NamedTextColor.GOLD));
         Fx.sound(base, Sound.BLOCK_BELL_RESONATE, 0.8f, 0.8f);
         Fx.sound(base, Sound.ENTITY_EVOKER_PREPARE_SUMMON, 1.0f, 0.7f);
 
@@ -85,9 +91,10 @@ final class AncientLegion {
             World w = at.getWorld();
             w.spawnParticle(Particle.BLOCK, at.clone().add(0, 0.5, 0), 25, 0.3, 0.6, 0.3, 0, SAND);
             w.spawnParticle(Particle.DUST, at.clone().add(0, 1, 0), 10, 0.3, 0.6, 0.3, 0, GOLD);
-            Husk m = w.spawn(at, Husk.class, this::setupSoldier);
+            LivingEntity m = w.getDifficulty() == Difficulty.PEACEFUL
+                    ? w.spawn(at, Mannequin.class, this::setupMannequin)
+                    : w.spawn(at, Husk.class, this::setupSoldier);
             soldiers.add(m);
-            kit.track(owner, m);
         }
 
         task = ctx.plugin().getServer().getScheduler().runTaskTimer(ctx.plugin(), new Runnable() {
@@ -96,7 +103,7 @@ final class AncientLegion {
             @Override
             public void run() {
                 tick++;
-                if (!owner.isOnline()) {
+                if (!owner.isOnline() || owner.isDead()) {
                     finish();
                     return;
                 }
@@ -118,7 +125,6 @@ final class AncientLegion {
                 }
             }
         }, 1L, 1L);
-        kit.track(owner, task);
     }
 
     private void setupSoldier(Husk m) {
@@ -145,10 +151,33 @@ final class AncientLegion {
         eq.setHelmetDropChance(0f);
     }
 
+    /** 평화로움 난이도용 병사 (몬스터가 아니라 사라지지 않음). */
+    private void setupMannequin(Mannequin m) {
+        Targets.markSummon(m);
+        m.setPersistent(false);
+        m.setInvulnerable(true);
+        m.setAI(false);
+        m.setGravity(false);
+        m.setCollidable(false);
+        m.setImmovable(true);
+        m.setSilent(true);
+        m.setRemoveWhenFarAway(false);
+        m.setCanPickupItems(false);
+        m.setDescription(null);
+        m.customName(Component.text("고대 병사", NamedTextColor.GOLD));
+        m.setCustomNameVisible(false);
+        EntityEquipment eq = m.getEquipment();
+        eq.clear();
+        eq.setItemInMainHand(new ItemStack(Material.NETHERITE_SPEAR));
+        eq.setHelmet(new ItemStack(Material.GOLDEN_HELMET));
+        eq.setItemInMainHandDropChance(0f);
+        eq.setHelmetDropChance(0f);
+    }
+
     /** 병사 전원 한 칸씩 전진, 경로의 적 밀쳐내기 + 피해. */
     private void chargeStep() {
         double dmg = ctx.isFever() ? CHARGE_DAMAGE * 1.2 : CHARGE_DAMAGE;
-        for (Husk m : soldiers) {
+        for (LivingEntity m : soldiers) {
             if (!m.isValid()) continue;
             Location cur = m.getLocation();
             Location next = cur.clone().add(forward.clone().multiply(CHARGE_SPEED));
@@ -162,14 +191,18 @@ final class AncientLegion {
             for (Entity e : w.getNearbyEntities(next.clone().add(0, 1, 0), 1.0, 1.2, 1.0)) {
                 if (!Targets.isEnemy(owner, e)) continue;
                 LivingEntity t = (LivingEntity) e;
-                // 계속 앞으로 밀어냄
-                t.setVelocity(forward.clone().multiply(1.1).setY(0.35));
-                if (chargeHit.add(t.getUniqueId())) {
+                Boolean passed = chargeHit.get(t.getUniqueId());
+                if (passed == null) {
                     t.setNoDamageTicks(0);
-                    Damage.skill(owner, t, dmg);
-                    Fx.sound(t.getLocation(), Sound.ENTITY_PLAYER_ATTACK_KNOCKBACK, 0.8f, 0.8f);
-                    Fx.burst(t.getLocation().add(0, t.getHeight() * 0.6, 0), Particle.CRIT, 10, 0.3);
+                    passed = Damage.skill(owner, t, dmg);
+                    chargeHit.put(t.getUniqueId(), passed);
+                    if (passed) {
+                        Fx.sound(t.getLocation(), Sound.ENTITY_PLAYER_ATTACK_KNOCKBACK, 0.8f, 0.8f);
+                        Fx.burst(t.getLocation().add(0, t.getHeight() * 0.6, 0), Particle.CRIT, 10, 0.3);
+                    }
                 }
+                // 피해가 들어간 적만 계속 앞으로 밀어냄 (PvP 꺼짐·보호구역이면 안 밂)
+                if (passed) t.setVelocity(forward.clone().multiply(1.1).setY(0.35));
             }
         }
         if (!soldiers.isEmpty() && soldiers.get(0).isValid()) {
@@ -183,11 +216,11 @@ final class AncientLegion {
         double dmg = ctx.isFever() ? JAB_DAMAGE * 1.2 : JAB_DAMAGE;
         Vector right = new Vector(-forward.getZ(), 0, forward.getX());
         boolean sound = true;
-        for (Husk m : soldiers) {
+        for (LivingEntity m : soldiers) {
             if (!m.isValid()) continue;
             m.swingMainHand();
             Location from = m.getLocation().add(0, 1.35, 0);
-            kit.miniSpears(owner, from, forward, 3.0, 2, jabCount);
+            kit.miniSpears(owner, from, forward, 3.0, 2, jabCount, true);
             if (sound) {
                 Fx.sound(from, Sound.ITEM_SPEAR_ATTACK, 0.9f, 1.2f + jabCount * 0.06f);
                 sound = false;
@@ -201,7 +234,7 @@ final class AncientLegion {
                 if (f < 0 || f > 3.5 || Math.abs(s) > 0.9 || rel.getY() < -1 || rel.getY() > 2.5) continue;
                 LivingEntity t = (LivingEntity) e;
                 t.setNoDamageTicks(0);
-                Damage.skill(owner, t, dmg);
+                if (!Damage.skill(owner, t, dmg)) continue;
                 t.setVelocity(t.getVelocity().multiply(0.3));
                 Fx.burst(t.getLocation().add(0, t.getHeight() * 0.6, 0), Particle.ENCHANTED_HIT, 4, 0.2);
             }
@@ -209,12 +242,9 @@ final class AncientLegion {
     }
 
     private void finish() {
-        if (task != null) {
-            task.cancel();
-            kit.untrack(owner, task);
-        }
+        if (task != null) task.cancel();
         boolean sound = true;
-        for (Husk m : soldiers) {
+        for (LivingEntity m : soldiers) {
             if (m.isValid()) {
                 Location at = m.getLocation();
                 at.getWorld().spawnParticle(Particle.BLOCK, at.clone().add(0, 1, 0), 30, 0.3, 0.7, 0.3, 0, SAND);
@@ -225,7 +255,6 @@ final class AncientLegion {
                 }
                 m.remove();
             }
-            kit.untrack(owner, m);
         }
         soldiers.clear();
     }
