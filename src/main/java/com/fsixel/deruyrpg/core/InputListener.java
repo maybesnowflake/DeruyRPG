@@ -160,7 +160,7 @@ public final class InputListener implements Listener {
             return;
         }
         fever.consume(p, kit.feverDurationTicks());
-        p.playSound(p.getLocation(), Sound.ITEM_TOTEM_USE, 0.7f, 1.4f);
+        p.playSound(p.getLocation(), Sound.BLOCK_BEACON_ACTIVATE, 0.6f, 1.6f);
         kit.onUltimate(ctx(p, item, kit, e));
     }
 
