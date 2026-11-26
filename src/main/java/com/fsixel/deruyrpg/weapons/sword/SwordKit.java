@@ -9,6 +9,9 @@ import com.fsixel.deruyrpg.util.Fx;
 import com.fsixel.deruyrpg.util.Items;
 import com.fsixel.deruyrpg.util.Targets;
 import io.papermc.paper.datacomponent.DataComponentTypes;
+import io.papermc.paper.datacomponent.item.BlocksAttacks;
+import io.papermc.paper.datacomponent.item.blocksattacks.DamageReduction;
+import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -46,7 +49,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 검 — docs/SKILLS.md "검".
- * P 연속 베기 / 우 패링 / 좌 휩쓸기 베기(평타) / ⇧우 돌진 베기 / F 일섬
+ * P 연속 베기 / 우 막기(유지)·패링(시작 0.25초) / 좌 휩쓸기 베기(평타) / ⇧우 돌진 베기 / F 일섬
  *
  * 피버(15초): 평타 전부 크리티컬(×1.5) · 공격 속도 대폭 증가 · 평타 대상 무적시간 무시 ·
  *             4중첩 크리티컬 시 대상 0.1초 프리징 · ⇧우 쿨다운 15% 감소
@@ -64,7 +67,10 @@ public final class SwordKit implements WeaponKit {
 
     // ---- 패링 ----
     private static final int PARRY_WINDOW_TICKS = 5;          // 0.25초 패링 창
-    private static final int PARRY_COOLDOWN_TICKS = 10;       // 창 종료 후 0.5초 → 총 0.75초
+    private static final int PARRY_COOLDOWN_TICKS = 10;       // 창 종료 후 0.5초 → 총 0.75초 (패링 판정에만 적용)
+
+    // ---- 막기 (바닐라 BLOCKS_ATTACKS) ----
+    private static final float BLOCK_FACTOR = 0.5f;           // 정면(±90°) 피해 50% 감소
 
     // ---- 돌진 베기 ----
     private static final int DASH_COOLDOWN = 140;             // 7초
@@ -118,13 +124,33 @@ public final class SwordKit implements WeaponKit {
 
     @Override
     public ItemStack createItem() {
-        return Items.weapon(Material.NETHERITE_SWORD, id(), "검", NamedTextColor.WHITE,
+        ItemStack item = Items.weapon(Material.NETHERITE_SWORD, id(), "검", NamedTextColor.WHITE,
                 "P  연속 베기 (3타마다 강화, 최대 4중첩)",
-                "우  패링 (0.25초)",
+                "우  막기 (유지) · 막기 시작 0.25초 안 피격 시 패링",
                 "좌  휩쓸기 베기",
                 "⇧우  2.5칸 돌진 베기",
                 "F  일섬",
                 "피버  모든 공격 크리티컬 · 공속 대폭 증가 · 무적시간 무시");
+        applyBlocking(item);
+        return item;
+    }
+
+    /**
+     * 바닐라 막기: 우클릭 유지 시 방패처럼 막기 자세 + 이동 느려짐, 정면(±90°) 피해 50% 감소. 쿨다운 없음.
+     * (도끼에 맞으면 바닐라 방패처럼 잠시 막기 불가 — 방패의 절반 시간)
+     */
+    private static void applyBlocking(ItemStack item) {
+        item.setData(DataComponentTypes.BLOCKS_ATTACKS, BlocksAttacks.blocksAttacks()
+                .blockDelaySeconds(0f)
+                .disableCooldownScale(0.5f)
+                .addDamageReduction(DamageReduction.damageReduction()
+                        .horizontalBlockingAngle(90f)
+                        .base(0f)
+                        .factor(BLOCK_FACTOR)
+                        .build())
+                .blockSound(Key.key("minecraft", "item.shield.block"))
+                .disableSound(Key.key("minecraft", "item.shield.break"))
+                .build());
     }
 
     @Override
@@ -162,10 +188,10 @@ public final class SwordKit implements WeaponKit {
     @Override
     public void onPassiveTick(SkillContext ctx) {
         Player p = ctx.player();
-        // 예전 버전 검(지속 막기 컴포넌트)이 남아 있으면 제거 → 우클릭은 패링 전용
+        // 2차 버전 검(막기 컴포넌트 제거됨)이면 다시 붙이기 → 우클릭 유지 막기 복구
         ItemStack hand = p.getInventory().getItemInMainHand();
-        if (hand.hasData(DataComponentTypes.BLOCKS_ATTACKS)) {
-            hand.resetData(DataComponentTypes.BLOCKS_ATTACKS);
+        if (!hand.hasData(DataComponentTypes.BLOCKS_ATTACKS) && !p.isHandRaised()) {
+            applyBlocking(hand);
             p.getInventory().setItemInMainHand(hand);
         }
         if (ctx.isFever()) applyFeverSpeed(ctx.plugin(), p);
@@ -338,30 +364,63 @@ public final class SwordKit implements WeaponKit {
     }
 
     // =====================================================================
-    // 우 — 패링
+    // 우 — 막기(유지, 바닐라) + 패링(막기 시작 0.25초)
     // =====================================================================
 
     @Override
     public void onRightClick(SkillContext ctx) {
+        // 막기 자체는 BLOCKS_ATTACKS 로 바닐라가 처리 (쿨다운 없음, 이벤트 취소 안 함).
+        // 패링 판정만 쿨다운: 0.25초 창 + 창 종료 후 0.5초 = 0.75초 뒤 다시 패링 가능.
         Player p = ctx.player();
-        // 0.25초 창 + 창 종료 후 0.5초 쿨다운 = 0.75초 뒤 재사용
         if (!ctx.tryCooldown(Slot.RIGHT, PARRY_WINDOW_TICKS + PARRY_COOLDOWN_TICKS)) return;
-        parryUntil.put(p.getUniqueId(), Bukkit.getCurrentTick() + PARRY_WINDOW_TICKS);
+        UUID id = p.getUniqueId();
+        int until = Bukkit.getCurrentTick() + PARRY_WINDOW_TICKS;
+        parryUntil.put(id, until);
 
-        // 창 열림 연출: 칼을 세우는 금속음 + 정면 반원 섬광
-        Location eye = p.getEyeLocation();
-        Vector fwd = flatDir(p);
-        Vector right = new Vector(-fwd.getZ(), 0, fwd.getX());
-        Location front = eye.clone().add(fwd.clone().multiply(0.9)).subtract(0, 0.4, 0);
-        for (int i = -3; i <= 3; i++) {
-            double a = i * Math.PI / 10;
-            Location l = front.clone().add(right.clone().multiply(Math.sin(a) * 0.8))
-                    .add(fwd.clone().multiply(-(1 - Math.cos(a)) * 0.6)).add(0, Math.abs(i) * 0.05, 0);
-            p.getWorld().spawnParticle(Particle.ENCHANTED_HIT, l, 1, 0, 0, 0, 0);
-        }
+        // 창 열림 연출: 칼을 세우는 금속음 + 정면 반원 섬광, 창이 열린 동안 반원 잔상 유지
+        parryArc(p, true);
+        Location front = parryFront(p);
         p.getWorld().spawnParticle(Particle.WHITE_ASH, front, 6, 0.3, 0.3, 0.3, 0);
         Fx.sound(front, Sound.ITEM_ARMOR_EQUIP_NETHERITE, 0.8f, 1.7f);
         Fx.sound(front, Sound.ENTITY_PLAYER_ATTACK_NODAMAGE, 0.6f, 1.6f);
+        Fx.sound(front, Sound.BLOCK_NOTE_BLOCK_BELL, 0.35f, 2.0f);
+
+        new BukkitRunnable() {
+            int t = 1;
+
+            @Override
+            public void run() {
+                Integer u = parryUntil.get(id);
+                if (!p.isOnline() || p.isDead() || u == null || u != until || t >= PARRY_WINDOW_TICKS) {
+                    cancel();
+                    return;
+                }
+                parryArc(p, false);
+                t++;
+            }
+        }.runTaskTimer(ctx.plugin(), 1L, 1L);
+    }
+
+    private static Location parryFront(Player p) {
+        return p.getEyeLocation().add(flatDir(p).multiply(0.9)).subtract(0, 0.4, 0);
+    }
+
+    /** 정면 반원 (±77°). opening=true 면 진하게 두 줄, false 면 창 유지 중 옅은 잔상. */
+    private static void parryArc(Player p, boolean opening) {
+        Vector fwd = flatDir(p);
+        Vector right = new Vector(-fwd.getZ(), 0, fwd.getX());
+        Location front = parryFront(p);
+        for (int i = -6; i <= 6; i++) {
+            double a = i * Math.PI / 14;
+            Location l = front.clone().add(right.clone().multiply(Math.sin(a) * 0.9))
+                    .add(fwd.clone().multiply(-(1 - Math.cos(a)) * 0.7)).add(0, Math.abs(i) * 0.04, 0);
+            if (opening) {
+                p.getWorld().spawnParticle(Particle.ENCHANTED_HIT, l, 1, 0, 0, 0, 0);
+                p.getWorld().spawnParticle(Particle.ELECTRIC_SPARK, l.clone().add(0, 0.35, 0), 1, 0, 0, 0, 0);
+            } else if ((i & 1) == 0) {
+                p.getWorld().spawnParticle(Particle.ELECTRIC_SPARK, l.clone().add(0, 0.15, 0), 1, 0, 0, 0, 0);
+            }
+        }
     }
 
     @Override
@@ -411,6 +470,7 @@ public final class SwordKit implements WeaponKit {
         if (inUltimate.contains(id) || dashing.contains(id)) return;
         int cd = ctx.isFever() ? (int) Math.round(DASH_COOLDOWN * DASH_FEVER_CD_MULT) : DASH_COOLDOWN;
         if (!ctx.tryCooldown(Slot.SHIFT_RIGHT, cd)) return;
+        ctx.cancelVanilla(); // 돌진 시엔 막기 자세 안 올림
         dashing.add(id);
 
         Vector dir = flatDir(p);
