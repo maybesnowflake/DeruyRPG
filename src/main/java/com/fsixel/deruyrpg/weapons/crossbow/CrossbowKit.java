@@ -51,7 +51,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * ⇧우 구속 화살 : 10초간 쏘는 화살 명중 시 구속 III 7초 (20초 쿨)
  * F  유도 연사  : 피버(15초) 동안 우클릭마다 장전 없이 즉시 유도 화살 (4틱 간격).
  *                 발사 시 시선 ±35° 원뿔에서 시선에 가장 가까운 적을 고정, 가까울수록 강하게 보정.
- *   피버 보너스 : 이 쇠뇌 화살 피해 +25%, 명중 넉백 +0.3, 모든 화살 구속 III 7초
+ *   피버 보너스 : 이 쇠뇌로 시작한 피버 중 쏜 화살(발사 시점 기록) 피해 +25%, 명중 넉백 +0.3, 구속 III 7초
  */
 public final class CrossbowKit implements WeaponKit, Listener {
 
@@ -60,6 +60,8 @@ public final class CrossbowKit implements WeaponKit, Listener {
     private static final byte FLAG_KIT = 1;
     private static final byte FLAG_SLOW = 2;
     private static final byte FLAG_HOMING = 4;
+    /** 이 쇠뇌로 시작한 피버 중에 쏜 화살 (발사 시점 기록). */
+    private static final byte FLAG_FEVER = 8;
 
     // ---- 수치 ----
     private static final int KICK_COOLDOWN = 30;          // 1.5초
@@ -137,7 +139,7 @@ public final class CrossbowKit implements WeaponKit, Listener {
     @Override
     public void onLeftClick(SkillContext ctx) {
         if (!ctx.tryCooldown(Slot.LEFT, KICK_COOLDOWN)) return;
-        kick(ctx, null);
+        kick(ctx, null, null);
     }
 
     @Override
@@ -147,14 +149,14 @@ public final class CrossbowKit implements WeaponKit, Listener {
         if (Targets.isEnemy(ctx.player(), target)) {
             event.setDamage(Math.max(event.getDamage(), kickDamage(ctx)));
         }
-        kick(ctx, target);
+        kick(ctx, target, event);
     }
 
     private double kickDamage(SkillContext ctx) {
         return ctx.isFever() ? KICK_DAMAGE_FEVER : KICK_DAMAGE;
     }
 
-    private void kick(SkillContext ctx, @Nullable LivingEntity direct) {
+    private void kick(SkillContext ctx, @Nullable LivingEntity direct, @Nullable EntityDamageByEntityEvent directEvent) {
         Player p = ctx.player();
         double dmg = kickDamage(ctx);
         double strength = ctx.isFever() ? 1.4 : 1.1;
@@ -163,13 +165,14 @@ public final class CrossbowKit implements WeaponKit, Listener {
         List<LivingEntity> hits = Targets.frontBox(p, KICK_WIDTH, KICK_RANGE, 2.0);
         for (LivingEntity t : hits) {
             if (t.equals(direct)) continue;
-            Damage.skill(p, t, dmg);
+            if (!Damage.skill(p, t, dmg)) continue; // 피해가 막히면 넉백도 없음
             Targets.push(t, from, strength, 0.35);
             Fx.burst(t.getLocation().add(0, 1, 0), Particle.CRIT, 6, 0.3);
         }
-        if (direct != null && Targets.isEnemy(p, direct)) {
+        if (direct != null && directEvent != null && Targets.isEnemy(p, direct)) {
             Bukkit.getScheduler().runTask(ctx.plugin(), () -> {
-                if (!direct.isDead()) Targets.push(direct, from, strength, 0.35);
+                // 평타가 취소(PvP 꺼짐·보호구역)됐으면 넉백 없음
+                if (!directEvent.isCancelled() && !direct.isDead()) Targets.push(direct, from, strength, 0.35);
             });
             Fx.burst(direct.getLocation().add(0, 1, 0), Particle.CRIT, 6, 0.3);
         }
@@ -194,7 +197,7 @@ public final class CrossbowKit implements WeaponKit, Listener {
         if (isSlowMode(p)) return; // 이미 활성 중이면 쿨다운 소모 없이 바닐라만
         if (!ctx.tryCooldown(Slot.SHIFT_RIGHT, SLOW_MODE_COOLDOWN)) return;
         slowUntil.put(p.getUniqueId(), Bukkit.getCurrentTick() + SLOW_MODE_TICKS);
-        p.sendActionBar(Component.text("구속 화살 활성 (10초) — 명중 시 구속 III 7초", NamedTextColor.AQUA));
+        ctx.flash(Component.text("구속 화살 활성 (10초) — 명중 시 구속 III 7초", NamedTextColor.AQUA));
         Fx.sound(p.getLocation(), Sound.BLOCK_POWDER_SNOW_PLACE, 1f, 0.7f);
         Fx.sound(p.getLocation(), Sound.ITEM_CROSSBOW_LOADING_END, 0.8f, 0.6f);
         Fx.ring(p.getLocation(), Particle.SNOWFLAKE, 1.2, 20);
@@ -217,7 +220,7 @@ public final class CrossbowKit implements WeaponKit, Listener {
         if (end == null) return;
         if (end <= Bukkit.getCurrentTick()) {
             slowUntil.remove(p.getUniqueId());
-            p.sendActionBar(Component.text("구속 화살 종료", NamedTextColor.GRAY));
+            ctx.flash(Component.text("구속 화살 종료", NamedTextColor.GRAY));
             return;
         }
         Location hand = p.getLocation().add(0, 1.1, 0);
@@ -236,7 +239,7 @@ public final class CrossbowKit implements WeaponKit, Listener {
         lastShot.remove(p.getUniqueId());
         Fx.sound(p.getLocation(), Sound.ITEM_CROSSBOW_QUICK_CHARGE_3, 1f, 1.2f);
         Fx.ring(p.getLocation().add(0, 0.2, 0), Particle.ELECTRIC_SPARK, 1.3, 24);
-        p.sendActionBar(Component.text("유도 연사! 우클릭으로 즉시 사격", NamedTextColor.GOLD));
+        ctx.flash(Component.text("유도 연사! 우클릭으로 즉시 사격", NamedTextColor.GOLD));
     }
 
     /** 피버 중 우클릭: 바닐라 장전 취소 + 내부 간격마다 유도 화살 1발. */
@@ -260,7 +263,12 @@ public final class CrossbowKit implements WeaponKit, Listener {
         arrow.setDamage(VOLLEY_ARROW_DAMAGE / SPEED_MULT);
         arrow.setCritical(true);
         arrow.setGravity(false);
-        byte flags = (byte) (FLAG_KIT | FLAG_HOMING | (isSlowMode(p) ? FLAG_SLOW : 0));
+        // 중력 없는 연출 화살: 저장 안 함(/reload·청크 저장 시 공중에 남지 않게) + 소환물 표시(onDisable 정리).
+        // 화살은 LivingEntity 가 아니라 markSummon 이 Targets 판정·피해 처리에 주는 영향 없음. 수명 타이머는 아래 유지.
+        arrow.setPersistent(false);
+        Targets.markSummon(arrow);
+        boolean fever = DeruyRPG.get().fever().isFever(p, id());
+        byte flags = (byte) (FLAG_KIT | FLAG_HOMING | (isSlowMode(p) ? FLAG_SLOW : 0) | (fever ? FLAG_FEVER : 0));
         arrow.getPersistentDataContainer().set(ARROW_KEY, PersistentDataType.BYTE, flags);
         Fx.sound(p.getLocation(), Sound.ITEM_CROSSBOW_SHOOT, 0.7f, 1.4f);
 
@@ -375,6 +383,7 @@ public final class CrossbowKit implements WeaponKit, Listener {
 
     @Override
     public void onUnequip(Player player) {
+        // 여러 번 불려도 안전 (맵 제거만). 피버 연사 간격 상태 정리 — 피버가 남아 있으면 다시 들었을 때 우클릭으로 재개.
         lastShot.remove(player.getUniqueId());
         slowUntil.remove(player.getUniqueId());
     }
@@ -414,6 +423,7 @@ public final class CrossbowKit implements WeaponKit, Listener {
 
         byte flags = FLAG_KIT;
         if (isSlowMode(p)) flags |= FLAG_SLOW;
+        if (DeruyRPG.get().fever().isFever(p, id())) flags |= FLAG_FEVER; // 이 쇠뇌 피버만, 발사 시점 기록
         proj.getPersistentDataContainer().set(ARROW_KEY, PersistentDataType.BYTE, flags);
     }
 
@@ -460,9 +470,11 @@ public final class CrossbowKit implements WeaponKit, Listener {
     /** 피버 중 화살 피해 +25%. */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onArrowDamageFever(EntityDamageByEntityEvent e) {
+        if (Damage.isProbe()) return;
         if (!(e.getDamager() instanceof Projectile proj)) return;
-        if ((flags(proj) & FLAG_KIT) == 0) return;
-        if (!(proj.getShooter() instanceof Player p) || !DeruyRPG.get().fever().isFever(p)) return;
+        byte f = flags(proj);
+        if ((f & FLAG_KIT) == 0 || (f & FLAG_FEVER) == 0) return;
+        if (!(proj.getShooter() instanceof Player p)) return;
         if (!(e.getEntity() instanceof LivingEntity target) || !Targets.isEnemy(p, target)) return;
         e.setDamage(e.getDamage() * FEVER_DAMAGE_MULT);
     }
@@ -470,12 +482,13 @@ public final class CrossbowKit implements WeaponKit, Listener {
     /** 구속 화살 명중 (피버 중엔 모든 화살) + 피버 넉백. */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onArrowDamage(EntityDamageByEntityEvent e) {
+        if (Damage.isProbe()) return;
         if (!(e.getDamager() instanceof Projectile proj)) return;
         byte f = flags(proj);
         if ((f & FLAG_KIT) == 0) return;
         if (!(proj.getShooter() instanceof Player p)) return;
         if (!(e.getEntity() instanceof LivingEntity target) || !Targets.isEnemy(p, target)) return;
-        boolean fever = DeruyRPG.get().fever().isFever(p);
+        boolean fever = (f & FLAG_FEVER) != 0;
         if (fever) {
             Vector push = proj.getVelocity().setY(0);
             if (push.lengthSquared() < 1e-6) push = target.getLocation().toVector().subtract(p.getLocation().toVector()).setY(0);
