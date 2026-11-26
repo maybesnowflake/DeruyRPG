@@ -3,6 +3,7 @@ package com.fsixel.deruyrpg.weapons.axe;
 import com.fsixel.deruyrpg.DeruyRPG;
 import com.fsixel.deruyrpg.api.SkillContext;
 import com.fsixel.deruyrpg.api.WeaponKit;
+import com.fsixel.deruyrpg.util.Cc;
 import com.fsixel.deruyrpg.util.Damage;
 import com.fsixel.deruyrpg.util.Fx;
 import com.fsixel.deruyrpg.util.Items;
@@ -28,6 +29,8 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityPotionEffectEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.EquipmentSlotGroup;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.potion.PotionEffect;
@@ -55,6 +58,10 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * 피버(15초): 흡혈 ×2, 평타가 주변 2칸 전방위 공격(작은 도끼 회전), 신속 III,
  *            회전 베기 체력 소모 없음 + 범위 6×6(±3칸).
+ *
+ * 피버 버프(신속 III·광폭화 최대·힘 I·CC 무시·넉백 저항)는 이 무기로 시작한 피버에만 적용되고,
+ * 무기를 놓으면 해제 → 피버가 남은 채로 다시 들면 onPassiveTick 에서 다시 적용된다.
+ * 연출(회전 도끼·내려찍기)은 무기를 놓아도 자체 타이머로 끝까지 진행 (접속 종료·사망 때만 즉시 정리).
  */
 public final class AxeKit implements WeaponKit, Listener {
 
@@ -94,6 +101,14 @@ public final class AxeKit implements WeaponKit, Listener {
     private static final NamespacedKey KB_KEY = new NamespacedKey("deruyrpg", "axe_unstoppable");
 
     private static final BlockData BLOOD = Material.REDSTONE_BLOCK.createBlockData();
+
+    /** 처형 CC 무시 중 막는 포션 (Cc 의 CC 목록과 동일). */
+    private static final Set<PotionEffectType> CC_POTIONS = Set.of(
+            PotionEffectType.SLOWNESS, PotionEffectType.LEVITATION, PotionEffectType.BLINDNESS,
+            PotionEffectType.DARKNESS, PotionEffectType.NAUSEA, PotionEffectType.WEAKNESS,
+            PotionEffectType.MINING_FATIGUE);
+    /** 피버 버프 포션 갱신 길이(틱) — 5틱마다 갱신, 무기 놓으면 이 길이 이하인 것만 제거. */
+    private static final int FEVER_POTION_TICKS = 15;
 
     // ---- 상태 ----
     /** 광폭화 modifier 가 붙어 있는 플레이어 → 현재 단계(0~1, 0.05 단위). */
@@ -153,17 +168,32 @@ public final class AxeKit implements WeaponKit, Listener {
         if (ctx.isFever()) t = 1; // 피버 동안 광폭화는 체력과 무관하게 최대
         applyRage(p, t);
 
-        // 피버: 신속 III
         if (ctx.isFever()) {
-            PotionEffect cur = p.getPotionEffect(PotionEffectType.SPEED);
-            if (cur == null || (cur.getAmplifier() <= 2 && cur.getDuration() < 10)) {
-                p.addPotionEffect(new PotionEffect(PotionEffectType.SPEED, 15, 2, true, false, true));
-            }
+            // 피버: 신속 III + 처형의 힘 I (짧게 계속 갱신 → 무기 놓으면 바로 해제 가능)
+            refreshFeverPotion(p, PotionEffectType.SPEED, 2);
+            refreshFeverPotion(p, PotionEffectType.STRENGTH, 0);
+            // 처형 CC 무시·넉백 저항: 무기를 놓았다가 다시 든 경우 재적용
+            if (!unstoppable.containsKey(p.getUniqueId())) startUnstoppable(ctx.plugin(), p);
         }
 
         if (t >= 1 && (++passiveCounter % 4 == 0)) {
             p.getWorld().spawnParticle(Particle.DUST, p.getLocation().add(0, 1, 0), 6, 0.35, 0.5, 0.35, 0,
                     new Particle.DustOptions(Color.fromRGB(170, 0, 0), 1.2f));
+        }
+    }
+
+    private static void refreshFeverPotion(Player p, PotionEffectType type, int amp) {
+        PotionEffect cur = p.getPotionEffect(type);
+        if (cur == null || (cur.getAmplifier() <= amp && cur.getDuration() < 10)) {
+            p.addPotionEffect(new PotionEffect(type, FEVER_POTION_TICKS, amp, true, false, true));
+        }
+    }
+
+    /** refreshFeverPotion 으로 붙인 효과만 제거 (다른 출처의 긴 효과·더 센 효과는 유지). */
+    private static void removeFeverPotion(Player p, PotionEffectType type, int amp) {
+        PotionEffect cur = p.getPotionEffect(type);
+        if (cur != null && cur.getAmplifier() == amp && cur.isAmbient() && cur.getDuration() <= FEVER_POTION_TICKS) {
+            p.removePotionEffect(type);
         }
     }
 
@@ -206,11 +236,13 @@ public final class AxeKit implements WeaponKit, Listener {
 
     @Override
     public void onRightClick(SkillContext ctx) {
-        ctx.cancelVanilla(); // 통나무 벗기기 등 바닐라 동작 방지
+        // 상자·문 등 상호작용 블록은 코어가 먼저 걸러 줌. 여기서는 도끼 고유 바닐라 동작
+        // (통나무·구리 벗기기)만 막으면 되므로 취소 유지.
+        ctx.cancelVanilla();
         Player p = ctx.player();
         boolean fever = ctx.isFever();
         if (!fever && p.getHealth() - SPIN_HP_COST < 1.0) {
-            p.sendActionBar(Component.text("체력이 부족해 회전 베기를 쓸 수 없다", NamedTextColor.RED));
+            ctx.flash(Component.text("체력이 부족해 회전 베기를 쓸 수 없다", NamedTextColor.RED));
             Fx.sound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.6f, 0.6f);
             return;
         }
@@ -238,7 +270,9 @@ public final class AxeKit implements WeaponKit, Listener {
             double dz = Math.abs(l.getZ() - c.getZ());
             double dy = l.getY() - c.getY();
             if (dx > half + 0.3 || dz > half + 0.3 || dy < -1.5 || dy > 2.5) continue;
+            if (!Damage.canHarm(p, e)) continue; // PvP 꺼짐·보호구역: 방패 무력화도 안 함
 
+            // 방패 무력화는 피해 전에 (막기 중이면 피해가 막히므로)
             if (e instanceof Player tp) {
                 tp.setCooldown(Material.SHIELD, SHIELD_DISABLE_TICKS);
                 if (tp.isBlocking() || tp.hasActiveItem()) {
@@ -249,7 +283,7 @@ public final class AxeKit implements WeaponKit, Listener {
                 e.clearActiveItem();
             }
             e.setNoDamageTicks(0);
-            Damage.skill(p, e, dmg);
+            if (!Damage.skill(p, e, dmg)) continue;
             Targets.push(e, c, 0.45, 0.2);
             e.getWorld().spawnParticle(Particle.BLOCK, e.getLocation().add(0, 1, 0), 10, 0.25, 0.35, 0.25, 0, BLOOD);
         }
@@ -336,7 +370,7 @@ public final class AxeKit implements WeaponKit, Listener {
 
     @Override
     public void onShiftRightClick(SkillContext ctx) {
-        ctx.cancelVanilla();
+        ctx.cancelVanilla(); // 웅크린 우클릭도 통나무 벗기기 방지 (상호작용 블록은 웅크리면 스킬이 우선)
         Player p = ctx.player();
         if (!ctx.tryCooldown(Slot.SHIFT_RIGHT, BLOOD_COOLDOWN)) return;
 
@@ -351,11 +385,12 @@ public final class AxeKit implements WeaponKit, Listener {
         base.setPitch(0);
         Vector fwd = base.getDirection();
         displays.chop(ctx.plugin(), p, 3.0f, () -> {
-            List<LivingEntity> hit = Targets.frontBox(p, 3, 4, 2.5);
-            for (LivingEntity e : hit) {
+            int bled = 0;
+            for (LivingEntity e : Targets.frontBox(p, 3, 4, 2.5)) {
                 e.setNoDamageTicks(0);
-                Damage.skill(p, e, BLOOD_HIT);
+                if (!Damage.skill(p, e, BLOOD_HIT)) continue; // 피해가 막히면 출혈도 없음
                 startBleed(ctx.plugin(), p, e, tick);
+                bled++;
             }
             Location impact = base.clone().add(fwd.clone().multiply(3.2)).add(0, 0.2, 0);
             p.getWorld().spawnParticle(Particle.BLOCK, impact, 40, 0.9, 0.3, 0.9, 0, BLOOD);
@@ -365,8 +400,8 @@ public final class AxeKit implements WeaponKit, Listener {
             Fx.sound(impact, Sound.ENTITY_PLAYER_ATTACK_STRONG, 1f, 0.6f);
             Fx.sound(impact, Sound.BLOCK_ANVIL_LAND, 0.7f, 0.5f);
             Fx.sound(impact, Sound.ENTITY_GENERIC_EXPLODE, 0.5f, 0.8f);
-            if (!hit.isEmpty()) {
-                p.sendActionBar(Component.text("출혈! (" + hit.size() + ")", NamedTextColor.DARK_RED));
+            if (bled > 0) {
+                ctx.flash(Component.text("출혈! (" + bled + ")", NamedTextColor.DARK_RED));
             }
         });
     }
@@ -421,7 +456,7 @@ public final class AxeKit implements WeaponKit, Listener {
                 Fx.sound(l, Sound.BLOCK_ANVIL_LAND, 0.6f, 0.6f);
                 executed++;
             } else {
-                Damage.skill(p, e, ULT_SPLASH);
+                if (!Damage.skill(p, e, ULT_SPLASH)) continue;
                 Targets.push(e, c, 0.6, 0.25);
                 Fx.burst(e.getLocation().add(0, 1, 0), Particle.CRIT, 10, 0.3);
             }
@@ -434,29 +469,34 @@ public final class AxeKit implements WeaponKit, Listener {
         Fx.ring(c, Particle.CRIMSON_SPORE, EXECUTE_RADIUS, 48);
         Fx.sound(c, Sound.ENTITY_PLAYER_ATTACK_SWEEP, 1f, 0.5f);
         Fx.sound(c, Sound.ENTITY_RAVAGER_ROAR, 1f, 0.9f);
-        p.sendActionBar(Component.text(executed > 0 ? "처형! (" + executed + ")" : "광전사의 포효!", NamedTextColor.DARK_RED));
+        ctx.flash(Component.text(executed > 0 ? "처형! (" + executed + ")" : "광전사의 포효!", NamedTextColor.DARK_RED));
 
-        int duration = Math.max(20, ctx.fever().feverRemaining(p));
-        p.addPotionEffect(new PotionEffect(PotionEffectType.STRENGTH, duration, 0, false, true, true));
+        // 피버 동안 힘 I 은 onPassiveTick 에서 짧게 갱신 (무기 놓으면 해제)
+        refreshFeverPotion(p, PotionEffectType.STRENGTH, 0);
         startUnstoppable(ctx.plugin(), p);
     }
 
     private void startUnstoppable(DeruyRPG plugin, Player p) {
         UUID id = p.getUniqueId();
         stopUnstoppable(p);
+        if (!plugin.fever().isFever(p, id())) return;
         setModifierAdd(p, Attribute.KNOCKBACK_RESISTANCE, KB_KEY, 1.0);
+        // 기절(Cc.stun) 포함 CC 면역: 남은 피버 시간만큼 (무기 놓으면 clearImmune)
+        Cc.setImmune(p, Math.max(1, plugin.fever().feverRemaining(p)));
 
         BukkitTask task = new BukkitRunnable() {
             int t = 0;
 
             @Override
             public void run() {
-                if (!p.isOnline() || p.isDead() || !plugin.fever().isFever(p)) {
+                if (!p.isOnline() || p.isDead() || !plugin.fever().isFever(p, id()) || !holdsAxe(p)) {
                     stopUnstoppable(p);
                     return;
                 }
-                p.removePotionEffect(PotionEffectType.SLOWNESS);
-                p.removePotionEffect(PotionEffectType.LEVITATION);
+                for (PotionEffectType type : CC_POTIONS) {
+                    if (p.hasPotionEffect(type)) p.removePotionEffect(type);
+                }
+                if (Cc.isStunned(p)) Cc.unstun(p);
                 if (++t % 5 == 0) {
                     p.getWorld().spawnParticle(Particle.DUST, p.getLocation().add(0, 0.2, 0), 4, 0.3, 0.05, 0.3, 0,
                             new Particle.DustOptions(Color.fromRGB(120, 0, 0), 1.0f));
@@ -468,20 +508,21 @@ public final class AxeKit implements WeaponKit, Listener {
 
     private void stopUnstoppable(Player p) {
         BukkitTask task = unstoppable.remove(p.getUniqueId());
-        if (task != null) task.cancel();
+        if (task != null) {
+            task.cancel();
+            Cc.clearImmune(p); // 우리가 건 면역만 해제 (작업이 없으면 다른 출처 면역은 건드리지 않음)
+        }
         removeModifier(p, Attribute.KNOCKBACK_RESISTANCE, KB_KEY);
     }
 
-    /** 처형 CC 무시 중에는 구속·공중부양 적용 자체를 막음 (매 틱 제거와 별개로). */
+    /** 처형 CC 무시 중에는 CC 포션 적용 자체를 막음 (매 틱 제거와 별개로). */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onPotion(EntityPotionEffectEvent e) {
         if (!(e.getEntity() instanceof Player p)) return;
         if (!unstoppable.containsKey(p.getUniqueId())) return;
         if (e.getAction() != EntityPotionEffectEvent.Action.ADDED && e.getAction() != EntityPotionEffectEvent.Action.CHANGED) return;
         PotionEffectType type = e.getModifiedType();
-        if (type == PotionEffectType.SLOWNESS || type == PotionEffectType.LEVITATION) {
-            e.setCancelled(true);
-        }
+        if (CC_POTIONS.contains(type)) e.setCancelled(true);
     }
 
     // =====================================================================
@@ -490,14 +531,26 @@ public final class AxeKit implements WeaponKit, Listener {
 
     @Override
     public void onUnequip(Player player) {
+        // 여러 번 불려도 안전 (전부 멱등). 연출 디스플레이는 끊지 않음 → 자체 타이머로 종료.
         clearRage(player);
         stopUnstoppable(player);
-        displays.clear(player);
         lastSweep.remove(player.getUniqueId());
-        PotionEffect sp = player.getPotionEffect(PotionEffectType.SPEED);
-        if (sp != null && sp.getAmplifier() == 2 && sp.getDuration() <= 15) {
-            player.removePotionEffect(PotionEffectType.SPEED);
-        }
+        removeFeverPotion(player, PotionEffectType.SPEED, 2);
+        removeFeverPotion(player, PotionEffectType.STRENGTH, 0);
+    }
+
+    /** 접속 종료: 연출까지 즉시 정리. */
+    @EventHandler
+    public void onQuit(PlayerQuitEvent e) {
+        onUnequip(e.getPlayer());
+        displays.clear(e.getPlayer());
+    }
+
+    /** 사망: 연출까지 즉시 정리. */
+    @EventHandler
+    public void onDeath(PlayerDeathEvent e) {
+        onUnequip(e.getPlayer());
+        displays.clear(e.getPlayer());
     }
 
     // =====================================================================

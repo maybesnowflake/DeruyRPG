@@ -27,7 +27,7 @@ import java.util.function.Consumer;
 
 /**
  * 도끼 연출용 ItemDisplay (NETHERITE_AXE) 관리.
- * 모든 디스플레이는 markSummon + persistent=false, 타이머로 제거되고 onUnequip 시 clear() 로 즉시 정리된다.
+ * 모든 디스플레이는 markSummon + persistent=false, 타이머로 제거되고 접속 종료·사망 시 clear() 로 즉시 정리된다.
  *
  * 모든 디스플레이는 yaw/pitch 0 으로 소환하고, 방향은 orient() 로 월드 좌표 기준 회전을 만든다.
  */
