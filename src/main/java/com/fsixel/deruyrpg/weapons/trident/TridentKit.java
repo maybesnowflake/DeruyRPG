@@ -42,7 +42,6 @@ import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -113,7 +112,6 @@ public final class TridentKit implements WeaponKit, Listener {
     private final Map<UUID, Integer> lastThrust = new ConcurrentHashMap<>();
     /** 찌르기 연출 ItemDisplay — onUnequip/퇴장 시 제거. */
     private final Map<UUID, Set<ItemDisplay>> thrustDisplays = new ConcurrentHashMap<>();
-    private BukkitTask cleanupTask;
     private static SwingAnimation spearSwing;
 
     @Override
@@ -256,28 +254,12 @@ public final class TridentKit implements WeaponKit, Listener {
                     AttributeModifier.Operation.ADD_NUMBER, EquipmentSlotGroup.ANY));
         }
         waterSpeed.add(p.getUniqueId());
-        ensureCleanup();
     }
 
     private void removeWaterSpeed(Player p) {
         AttributeInstance attr = p.getAttribute(Attribute.ATTACK_SPEED);
         if (attr != null && attr.getModifier(WATER_SPEED_KEY) != null) attr.removeModifier(WATER_SPEED_KEY);
         waterSpeed.remove(p.getUniqueId());
-    }
-
-    /** 무기를 던지거나 인벤토리에서 옮기면 onUnequip 이 안 불리므로 주기적으로 정리. */
-    private void ensureCleanup() {
-        if (cleanupTask != null && !cleanupTask.isCancelled()) return;
-        cleanupTask = Bukkit.getScheduler().runTaskTimer(DeruyRPG.get(), () -> {
-            for (UUID id : new ArrayList<>(waterSpeed)) {
-                Player p = Bukkit.getPlayer(id);
-                if (p == null) {
-                    waterSpeed.remove(id);
-                } else if (!isTrident(p.getInventory().getItemInMainHand()) || !p.isInWaterOrBubbleColumn()) {
-                    removeWaterSpeed(p);
-                }
-            }
-        }, 10L, 10L);
     }
 
     /** 근접 평타: 물의 가호 추가 피해 + 비 속이면 물살 찌르기. */
@@ -379,9 +361,10 @@ public final class TridentKit implements WeaponKit, Listener {
             double distSq = rel.clone().subtract(dir.clone().multiply(t)).lengthSquared();
             double allow = STREAM_WIDTH + le.getWidth() / 2;
             if (distSq > allow * allow) continue;
-            Damage.skill(p, le, dmg);
-            le.setVelocity(le.getVelocity().add(dir.clone().setY(0).multiply(0.35)));
-            splash(c.toLocation(w));
+            if (Damage.skill(p, le, dmg)) {
+                le.setVelocity(le.getVelocity().add(dir.clone().setY(0).multiply(0.35)));
+                splash(c.toLocation(w));
+            }
         }
         return dmg;
     }
@@ -389,11 +372,12 @@ public final class TridentKit implements WeaponKit, Listener {
     /** 투척 삼지창 명중에도 물의 가호 적용 + 손이 비어 코어가 못 채우는 피버 게이지 보충. */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onTridentHit(EntityDamageByEntityEvent e) {
+        if (Damage.isProbe()) return;
         if (!(e.getDamager() instanceof Trident t) || !isTrident(t.getItemStack())) return;
         if (!(t.getShooter() instanceof Player p) || !(e.getEntity() instanceof LivingEntity target)) return;
         if (!Targets.isEnemy(p, target)) return;
         if (isWet(p) || isWet(p, target)) {
-            boolean fever = DeruyRPG.get().fever().isFever(p);
+            boolean fever = DeruyRPG.get().fever().isFever(p, id());
             e.setDamage(e.getDamage() + (fever ? WET_BONUS + 1 : WET_BONUS));
             splash(target.getLocation().add(0, target.getHeight() * 0.6, 0));
         }
@@ -401,6 +385,7 @@ public final class TridentKit implements WeaponKit, Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onTridentHitMonitor(EntityDamageByEntityEvent e) {
+        if (Damage.isProbe()) return;
         if (!(e.getDamager() instanceof Trident t) || !isTrident(t.getItemStack())) return;
         if (!(t.getShooter() instanceof Player p) || e.getFinalDamage() <= 0) return;
         // 주손에 RPG 무기가 있으면 코어가 이미 게이지를 채움
@@ -506,7 +491,7 @@ public final class TridentKit implements WeaponKit, Listener {
                     if (le.getBoundingBox().getCenter().distanceSquared(c.toVector())
                             > (RIPTIDE_HIT_RADIUS + le.getWidth() / 2) * (RIPTIDE_HIT_RADIUS + le.getWidth() / 2) + 1) continue;
                     if (!hit.add(le.getUniqueId())) continue;
-                    Damage.skill(p, le, dmg);
+                    if (!Damage.skill(p, le, dmg)) continue;
                     le.setVelocity(fwd.clone().setY(0).multiply(0.6).setY(0.35));
                     splash(le.getLocation().add(0, le.getHeight() * 0.6, 0));
                     Fx.sound(le.getLocation(), Sound.ITEM_TRIDENT_HIT, 0.8f, 1.2f);
@@ -566,6 +551,7 @@ public final class TridentKit implements WeaponKit, Listener {
         w.spawnParticle(Particle.BUBBLE_POP, base.clone().add(0, 0.5, 0), 40, radius * 0.5, 0.3, radius * 0.5, 0.1);
 
         Set<UUID> hit = new HashSet<>();
+        Set<UUID> lifted = new HashSet<>(); // 피해가 실제로 들어간 적만 띄움
         new BukkitRunnable() {
             int t = 0;
 
@@ -619,10 +605,13 @@ public final class TridentKit implements WeaponKit, Listener {
                     double dy = l.getY() - base.getY();
                     if (dx * dx + dz * dz > radius * radius || dy < -1 || dy > h) continue;
                     if (hit.add(le.getUniqueId())) {
-                        Damage.skill(p, le, dmg);
-                        le.setVelocity(new Vector(0, lift, 0));
-                        splash(l.clone().add(0, 0.5, 0));
-                    } else if (t <= COLUMN_TICKS - 8 && le.getVelocity().getY() < 0.3) {
+                        if (Damage.skill(p, le, dmg)) {
+                            lifted.add(le.getUniqueId());
+                            le.setVelocity(new Vector(0, lift, 0));
+                            splash(l.clone().add(0, 0.5, 0));
+                        }
+                    } else if (lifted.contains(le.getUniqueId())
+                            && t <= COLUMN_TICKS - 8 && le.getVelocity().getY() < 0.3) {
                         le.setVelocity(le.getVelocity().setY(0.35));
                     }
                 }
@@ -661,7 +650,7 @@ public final class TridentKit implements WeaponKit, Listener {
         stopStorm(p.getUniqueId());
         Fx.sound(p.getLocation(), Sound.ITEM_TRIDENT_THUNDER, 1f, 1f);
         Fx.sound(p.getLocation(), Sound.WEATHER_RAIN_ABOVE, 1f, 0.8f);
-        p.sendActionBar(Component.text("뇌우 소환!", NamedTextColor.AQUA));
+        ctx.flash(Component.text("뇌우 소환!", NamedTextColor.AQUA));
 
         UUID id = p.getUniqueId();
         int duration = feverDurationTicks(); // 피버 기본 15초
@@ -719,8 +708,9 @@ public final class TridentKit implements WeaponKit, Listener {
                         }
                         w.spawnParticle(Particle.ELECTRIC_SPARK, el.clone().add(0, e.getHeight() * 0.5, 0),
                                 10, 0.3, e.getHeight() * 0.35, 0.3, 0.15);
+                        int prevNoDmg = e.getNoDamageTicks();
                         e.setNoDamageTicks(0);
-                        Damage.magic(p, e, dmg);
+                        if (!Damage.magic(p, e, dmg)) e.setNoDamageTicks(prevNoDmg); // 보호 대상은 무적시간 원복
                     }
                     if (!enemies.isEmpty() && bolt == null) {
                         Fx.sound(c, Sound.ENTITY_GUARDIAN_ATTACK, 0.25f, 2f);
@@ -742,7 +732,11 @@ public final class TridentKit implements WeaponKit, Listener {
     // 정리
     // =====================================================================
 
-    /** 손에서 빠지면 물속 공격 속도 해제. 비 소환은 피버(궁극기) 동안 유지. */
+    /**
+     * 손에서 빠지면 물속 공격 속도·찌르기 연출 해제 (여러 번 불려도 안전).
+     * 뇌우(궁극기)와 진행 중인 급류는 끊지 않고 자체 타이머로 끝까지 진행 — 정리는 종료·사망·퇴장 때.
+     * 피버 전용 버프는 수치 보너스(ctx.isFever)뿐이라 해제할 attribute/포션이 없음.
+     */
     @Override
     public void onUnequip(Player player) {
         removeWaterSpeed(player);
