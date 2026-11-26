@@ -150,6 +150,7 @@ public final class AxeKit implements WeaponKit, Listener {
         // 100% → 0, 30% 이하 → 1 (선형)
         double t = Math.max(0, Math.min(1, (1 - ratio) / (1 - RAGE_FULL_AT)));
         t = Math.round(t * 20) / 20.0;
+        if (ctx.isFever()) t = 1; // 피버 동안 광폭화는 체력과 무관하게 최대
         applyRage(p, t);
 
         // 피버: 신속 III
@@ -250,14 +251,13 @@ public final class AxeKit implements WeaponKit, Listener {
             e.setNoDamageTicks(0);
             Damage.skill(p, e, dmg);
             Targets.push(e, c, 0.45, 0.2);
-            Fx.burst(e.getLocation().add(0, 1, 0), Particle.CRIT, 8, 0.3);
+            e.getWorld().spawnParticle(Particle.BLOCK, e.getLocation().add(0, 1, 0), 10, 0.25, 0.35, 0.25, 0, BLOOD);
         }
 
-        // 연출: 도끼 3자루가 빠르게 한 바퀴
-        displays.orbit(ctx.plugin(), p, 3, half + 0.2, 1.3f, 1.0, 8, 1.0, Particle.SWEEP_ATTACK, null);
-        Fx.ring(c, Particle.CRIT, half + 0.2, 24);
-        Fx.sound(c, Sound.ENTITY_PLAYER_ATTACK_SWEEP, 1f, 0.7f);
+        // 연출: 도끼 3자루만 빠르게 한 바퀴 (휩쓸기 파티클·검 소리 없음)
+        displays.orbit(ctx.plugin(), p, 3, half + 0.2, 1.3f, 1.0, 8, 1.0, null, null);
         Fx.sound(c, Sound.ITEM_AXE_SCRAPE, 0.8f, 0.6f);
+        Fx.sound(c, Sound.ITEM_AXE_STRIP, 1f, 0.6f);
         Fx.sound(c, Sound.ITEM_TRIDENT_RIPTIDE_1, 0.6f, 1.4f);
     }
 
@@ -274,9 +274,18 @@ public final class AxeKit implements WeaponKit, Listener {
         if (dealt > 0) lifesteal(p, dealt, fever);
         target.getWorld().spawnParticle(Particle.BLOCK, target.getLocation().add(0, 1, 0), 6, 0.25, 0.3, 0.25, 0, BLOOD);
 
-        // 피버: 전방위 평타
+        // 피버: 전방위 평타 — 원래 맞은 적에게도 범위 피해가 들어가도록 다음 틱에 무적시간을 지우고 따로 적용
         if (fever && event.getDamage() > 0) {
-            feverSweep(ctx, event.getDamage(), target);
+            double sweepDmg = event.getDamage();
+            feverSweep(ctx, sweepDmg, target);
+            Bukkit.getScheduler().runTask(ctx.plugin(), () -> {
+                if (!target.isValid() || target.isDead() || !p.isOnline() || p.isDead()) return;
+                double before = target.getHealth();
+                target.setNoDamageTicks(0);
+                Damage.skill(p, target, sweepDmg);
+                double done = Math.max(0, before - (target.isDead() ? 0 : target.getHealth()));
+                if (done > 0) lifesteal(p, done, true);
+            });
         }
     }
 
