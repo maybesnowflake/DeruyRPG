@@ -1,6 +1,7 @@
 package com.fsixel.deruyrpg.weapons.shield;
 
 import com.fsixel.deruyrpg.DeruyRPG;
+import com.fsixel.deruyrpg.core.HudTask;
 import com.fsixel.deruyrpg.util.Damage;
 import com.fsixel.deruyrpg.util.Fx;
 import com.fsixel.deruyrpg.util.Targets;
@@ -47,17 +48,19 @@ final class Sanctuary {
     static final int DURATION = 160;
     static final double BLIND_RADIUS = 7.0;
     static final int MAX_REVIVES = 2;
-    static final int SHIELD_COUNT = 20;
+    static final int SHIELD_COUNT = 24;
     static final double PUSH_RADIUS = RADIUS + 2.0;
     /** 방패 고리 회전 속도 (라디안/틱). */
-    private static final double SPIN = 0.09;
-    /** 돔 안으로 들어오는 적에게 주는 피해 / 같은 적 재적용 간격(틱). */
+    private static final double SPIN = 0.06;
+    /** 돔 안으로 들어오는 적에게 주는 피해(고정) / 같은 적 재적용 간격(틱). */
     static final double ENTRY_DAMAGE = 3.0;
-    static final double ENTRY_DAMAGE_FEVER = 4.0;
     static final int ENTRY_HIT_GAP = 20;
+    /** 시전자 이동 속도 감소 (-30%, attribute — 정화·CC 면역에 지워지지 않음). */
+    static final double CASTER_SLOW = -0.3;
 
     private static final NamespacedKey KB_KEY = new NamespacedKey("deruyrpg", "shield_unstoppable");
     private static final NamespacedKey EXPLOSION_KB_KEY = new NamespacedKey("deruyrpg", "shield_unstoppable_explosion");
+    private static final NamespacedKey SLOW_KEY = new NamespacedKey("deruyrpg", "shield_sanctuary_slow");
     private static final List<PotionEffectType> CC = List.of(
             PotionEffectType.LEVITATION, PotionEffectType.BLINDNESS, PotionEffectType.DARKNESS,
             PotionEffectType.NAUSEA, PotionEffectType.WEAKNESS, PotionEffectType.MINING_FATIGUE);
@@ -67,7 +70,6 @@ final class Sanctuary {
     private final Map<UUID, Boolean> projectileInside = new HashMap<>();
     private Map<UUID, Boolean> enemyInside = new HashMap<>();
     private final Map<UUID, Integer> enemyLastHit = new HashMap<>();
-    private final java.util.function.BooleanSupplier fever;
     private final List<ItemDisplay> shields = new ArrayList<>();
     private final Map<UUID, OwnedRegen> reviveRegen = new HashMap<>();
     private final Runnable onEnd;
@@ -76,9 +78,8 @@ final class Sanctuary {
     private int revivesLeft = MAX_REVIVES;
     private boolean ended;
 
-    Sanctuary(Player owner, java.util.function.BooleanSupplier fever, Runnable onEnd) {
+    Sanctuary(Player owner, Runnable onEnd) {
         this.owner = owner.getUniqueId();
-        this.fever = fever;
         this.center = owner.getLocation().clone();
         this.onEnd = onEnd;
     }
@@ -93,6 +94,7 @@ final class Sanctuary {
         p.addPotionEffect(new PotionEffect(PotionEffectType.GLOWING, DURATION, 0, false, false));
         addModifier(p, Attribute.KNOCKBACK_RESISTANCE, KB_KEY);
         addModifier(p, Attribute.EXPLOSION_KNOCKBACK_RESISTANCE, EXPLOSION_KB_KEY);
+        addSlow(p);
         clearCc(p);
 
         Fx.sound(center, Sound.ITEM_SHIELD_BLOCK, 1f, 0.6f);
@@ -100,7 +102,7 @@ final class Sanctuary {
         Fx.sphere(center, Particle.END_ROD, RADIUS, 220);
         spawnShields();
         repel(p);
-        p.sendActionBar(Component.text("성역 전개!", NamedTextColor.AQUA));
+        HudTask.flash(p, Component.text("성역 전개!", NamedTextColor.AQUA), 30);
 
         task = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, 1L, 1L);
     }
@@ -119,6 +121,7 @@ final class Sanctuary {
         if (ticks % 5 == 0) clearCc(p);
         if (ticks % 10 == 0) {
             for (LivingEntity e : Targets.enemiesAround(p, p.getLocation(), BLIND_RADIUS)) {
+                if (!Damage.canHarm(p, e)) continue;
                 e.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, 40, 0, false, false));
             }
         }
@@ -139,7 +142,7 @@ final class Sanctuary {
             Integer last = enemyLastHit.get(id);
             if (last != null && ticks - last < ENTRY_HIT_GAP) continue;
             enemyLastHit.put(id, ticks);
-            Damage.skill(p, e, fever.getAsBoolean() ? ENTRY_DAMAGE_FEVER : ENTRY_DAMAGE);
+            if (!Damage.skill(p, e, ENTRY_DAMAGE)) continue; // 피해가 막히면 튕김도 없음
             Targets.push(e, center, 0.7, 0.3);
             Location l = e.getLocation().add(0, 1, 0);
             l.getWorld().spawnParticle(Particle.ENCHANTED_HIT, l, 10, 0.3, 0.4, 0.3, 0.1);
@@ -209,9 +212,9 @@ final class Sanctuary {
         Location l = ally.getLocation().add(0, 1, 0);
         l.getWorld().spawnParticle(Particle.TOTEM_OF_UNDYING, l, 60, 0.5, 0.8, 0.5, 0.3);
         Fx.sound(l, Sound.ITEM_TOTEM_USE, 1f, 1f);
-        ally.sendActionBar(Component.text("성역이 당신을 지켰다!", NamedTextColor.GOLD));
+        HudTask.flash(ally, Component.text("성역이 당신을 지켰다!", NamedTextColor.GOLD), 40);
         if (!ally.equals(p)) {
-            p.sendActionBar(Component.text("성역 부활 (" + revivesLeft + "회 남음)", NamedTextColor.GOLD));
+            HudTask.flash(p, Component.text("성역 부활 (" + revivesLeft + "회 남음)", NamedTextColor.GOLD), 40);
         }
         return true;
     }
@@ -235,6 +238,7 @@ final class Sanctuary {
         if (p != null) {
             removeModifier(p, Attribute.KNOCKBACK_RESISTANCE, KB_KEY);
             removeModifier(p, Attribute.EXPLOSION_KNOCKBACK_RESISTANCE, EXPLOSION_KB_KEY);
+            removeModifier(p, Attribute.MOVEMENT_SPEED, SLOW_KEY);
         }
         Fx.sound(center, Sound.BLOCK_BEACON_DEACTIVATE, 0.8f, 1.2f);
         onEnd.run();
@@ -243,6 +247,7 @@ final class Sanctuary {
     /** 발동 시 주변 적을 돔 바깥으로 밀쳐냄. */
     private void repel(Player p) {
         for (LivingEntity e : Targets.enemiesAround(p, center, PUSH_RADIUS)) {
+            if (!Damage.canHarm(p, e)) continue;
             double d = e.getLocation().distance(center);
             double strength = 1.0 + Math.max(0, (RADIUS - d)) * 0.25;
             Targets.push(e, center, strength, 0.45);
@@ -293,6 +298,22 @@ final class Sanctuary {
         return l;
     }
 
+    /** 피버 버프가 해제될 때(무기 놓기) 덮여 있던 성역 버프를 남은 시간만큼 다시 건다. 흡수량은 늘리지 않음. */
+    void restoreOwnerBuffs(Player p, double absorbCap) {
+        int left = DURATION - ticks;
+        if (ended || left <= 0) return;
+        p.addPotionEffect(new PotionEffect(PotionEffectType.RESISTANCE, left, 0, false, true));
+        p.addPotionEffect(new PotionEffect(PotionEffectType.ABSORPTION, left, 1, false, true));
+        p.setAbsorptionAmount(Math.min(p.getAbsorptionAmount(), absorbCap));
+    }
+
+    private static void addSlow(Player p) {
+        AttributeInstance inst = p.getAttribute(Attribute.MOVEMENT_SPEED);
+        if (inst == null) return;
+        inst.removeModifier(SLOW_KEY);
+        inst.addTransientModifier(new AttributeModifier(SLOW_KEY, CASTER_SLOW, AttributeModifier.Operation.MULTIPLY_SCALAR_1));
+    }
+
     private static void clearCc(Player p) {
         for (PotionEffectType t : CC) p.removePotionEffect(t);
     }
@@ -313,5 +334,6 @@ final class Sanctuary {
     static void cleanup(Player p) {
         removeModifier(p, Attribute.KNOCKBACK_RESISTANCE, KB_KEY);
         removeModifier(p, Attribute.EXPLOSION_KNOCKBACK_RESISTANCE, EXPLOSION_KB_KEY);
+        removeModifier(p, Attribute.MOVEMENT_SPEED, SLOW_KEY);
     }
 }
