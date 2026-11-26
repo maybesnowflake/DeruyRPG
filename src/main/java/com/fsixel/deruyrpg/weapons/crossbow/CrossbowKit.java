@@ -74,7 +74,9 @@ public final class CrossbowKit implements WeaponKit, Listener {
     private static final int SLOW_AMPLIFIER = 2;          // 구속 III
 
     private static final int FEVER_SHOT_INTERVAL = 4;      // 피버 우클릭 최소 간격(틱)
-    private static final double VOLLEY_SPEED = 2.6;
+    /** 화살 비행 속도 배율 (사용자 요청 4배). 바닐라 화살 피해는 속도에 비례하므로 피해값은 같은 비율로 나눠 보정. */
+    private static final double SPEED_MULT = 4.0;
+    private static final double VOLLEY_SPEED = 2.6 * SPEED_MULT;
     private static final double VOLLEY_ARROW_DAMAGE = 1.0; // 바닐라 기본 2.0 (속도 곱)
     private static final double HOMING_RANGE = 32.0;       // 발사 시 타겟 탐색 거리
     private static final double HOMING_CONE_DEG = 35.0;    // 시선 원뿔 반각
@@ -255,7 +257,7 @@ public final class CrossbowKit implements WeaponKit, Listener {
         Arrow arrow = p.launchProjectile(Arrow.class, dir.clone().multiply(VOLLEY_SPEED));
         arrow.setShooter(p);
         arrow.setPickupStatus(AbstractArrow.PickupStatus.DISALLOWED);
-        arrow.setDamage(VOLLEY_ARROW_DAMAGE);
+        arrow.setDamage(VOLLEY_ARROW_DAMAGE / SPEED_MULT);
         arrow.setCritical(true);
         arrow.setGravity(false);
         byte flags = (byte) (FLAG_KIT | FLAG_HOMING | (isSlowMode(p) ? FLAG_SLOW : 0));
@@ -399,11 +401,14 @@ public final class CrossbowKit implements WeaponKit, Listener {
         Entity proj = e.getProjectile();
 
         straighten(p, proj);
+        // 속도 4배 + 피해 보정
+        proj.setVelocity(proj.getVelocity().multiply(SPEED_MULT));
+        if (proj instanceof org.bukkit.entity.AbstractArrow aa) aa.setDamage(aa.getDamage() / SPEED_MULT);
         // 이벤트 시점에 속도가 아직 0이면 다음 틱에 재정렬
         if (proj.getVelocity().lengthSquared() < 1e-4) {
             Vector look = p.getEyeLocation().getDirection();
             Bukkit.getScheduler().runTask(DeruyRPG.get(), () -> {
-                if (proj.isValid()) proj.setVelocity(look.clone().multiply(Math.max(proj.getVelocity().length(), 3.15)));
+                if (proj.isValid()) proj.setVelocity(look.clone().multiply(3.15 * SPEED_MULT));
             });
         }
 

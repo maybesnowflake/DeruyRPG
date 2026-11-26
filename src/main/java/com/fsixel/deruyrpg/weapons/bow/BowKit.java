@@ -59,7 +59,7 @@ public final class BowKit implements WeaponKit, Listener {
     private static final double EXPLOSION_DAMAGE = 10.0;  // 중심 피해, 가장자리로 갈수록 감소
     private static final double EXPLOSION_EDGE_RATIO = 0.25; // 반경 끝에서의 피해 비율
 
-    private static final double FEVER_MULT = 1.25;        // 피버 중 상시 피해 +25%
+    private static final double FEVER_MULT = 3.0;         // 피버 중 상시 피해 +200%
     private static final double SONIC_RANGE = 30.0;
     private static final double SONIC_WIDTH = 1.5;
     private static final double SONIC_DAMAGE = 10.0;      // 풀차지 기준, 당긴 정도에 비례 (최소 35%)

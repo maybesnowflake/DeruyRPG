@@ -68,7 +68,26 @@ public final class SkillContext {
     // ---- 마나 ----
     public ManaManager mana() { return plugin.mana(); }
 
-    /** 마나(0.0~1.0)를 amount 만큼 쓸 수 있으면 소모하고 true. */
+    /** 마나가 amount 이상 있는지 (소모 안 함). */
+    public boolean hasMana(float amount) {
+        return plugin.mana().has(player, amount);
+    }
+
+    /**
+     * 쿨다운 확인 → 마나 확인 → 둘 다 OK 면 쿨다운 걸고 마나 소모. 하나라도 실패하면 아무것도 안 씀.
+     * (연타 시 스킬은 안 나가는데 마나만 빠지는 문제 방지용)
+     */
+    public boolean tryCooldownAndMana(String slot, int ticks, float mana) {
+        if (onCooldown(slot)) return false;
+        if (!plugin.mana().has(player, mana)) {
+            plugin.mana().tryConsume(player, mana); // 부족 메시지만 표시
+            return false;
+        }
+        if (!tryCooldown(slot, ticks)) return false;
+        return plugin.mana().tryConsume(player, mana);
+    }
+
+    /** 마나(기본 최대 1.0)를 amount 만큼 쓸 수 있으면 소모하고 true. */
     public boolean tryMana(float amount) {
         return plugin.mana().tryConsume(player, amount);
     }

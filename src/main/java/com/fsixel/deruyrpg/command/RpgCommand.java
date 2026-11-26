@@ -65,7 +65,7 @@ public final class RpgCommand implements TabExecutor {
             }
             case "mana" -> {
                 Player target = target(sender, args, 1);
-                if (target != null) plugin.mana().set(target, 1f);
+                if (target != null) plugin.mana().set(target, plugin.mana().max(target));
             }
             case "dummy" -> {
                 if (args.length > 1 && args[1].equalsIgnoreCase("clear")) {
