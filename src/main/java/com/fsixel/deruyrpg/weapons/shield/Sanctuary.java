@@ -1,6 +1,7 @@
 package com.fsixel.deruyrpg.weapons.shield;
 
 import com.fsixel.deruyrpg.DeruyRPG;
+import com.fsixel.deruyrpg.util.Damage;
 import com.fsixel.deruyrpg.util.Fx;
 import com.fsixel.deruyrpg.util.Targets;
 import net.kyori.adventure.text.Component;
@@ -46,10 +47,14 @@ final class Sanctuary {
     static final int DURATION = 160;
     static final double BLIND_RADIUS = 7.0;
     static final int MAX_REVIVES = 2;
-    static final int SHIELD_COUNT = 12;
+    static final int SHIELD_COUNT = 20;
     static final double PUSH_RADIUS = RADIUS + 2.0;
     /** 방패 고리 회전 속도 (라디안/틱). */
-    private static final double SPIN = 0.03;
+    private static final double SPIN = 0.09;
+    /** 돔 안으로 들어오는 적에게 주는 피해 / 같은 적 재적용 간격(틱). */
+    static final double ENTRY_DAMAGE = 3.0;
+    static final double ENTRY_DAMAGE_FEVER = 4.0;
+    static final int ENTRY_HIT_GAP = 20;
 
     private static final NamespacedKey KB_KEY = new NamespacedKey("deruyrpg", "shield_unstoppable");
     private static final NamespacedKey EXPLOSION_KB_KEY = new NamespacedKey("deruyrpg", "shield_unstoppable_explosion");
@@ -60,6 +65,9 @@ final class Sanctuary {
     private final UUID owner;
     private final Location center;
     private final Map<UUID, Boolean> projectileInside = new HashMap<>();
+    private Map<UUID, Boolean> enemyInside = new HashMap<>();
+    private final Map<UUID, Integer> enemyLastHit = new HashMap<>();
+    private final java.util.function.BooleanSupplier fever;
     private final List<ItemDisplay> shields = new ArrayList<>();
     private final Map<UUID, OwnedRegen> reviveRegen = new HashMap<>();
     private final Runnable onEnd;
@@ -68,8 +76,9 @@ final class Sanctuary {
     private int revivesLeft = MAX_REVIVES;
     private boolean ended;
 
-    Sanctuary(Player owner, Runnable onEnd) {
+    Sanctuary(Player owner, java.util.function.BooleanSupplier fever, Runnable onEnd) {
         this.owner = owner.getUniqueId();
+        this.fever = fever;
         this.center = owner.getLocation().clone();
         this.onEnd = onEnd;
     }
@@ -102,7 +111,7 @@ final class Sanctuary {
             end();
             return;
         }
-        if (ticks % 2 == 0) spinShields();
+        spinShields();
         if (ticks % 4 == 0) {
             Fx.sphere(center, Particle.END_ROD, RADIUS, 110);
             Fx.ring(center, Particle.ENCHANT, RADIUS, 32);
@@ -114,6 +123,30 @@ final class Sanctuary {
             }
         }
         blockProjectiles(p);
+        hitEntering(p);
+    }
+
+    /** 돔 밖 → 안으로 들어오는 적: 약한 피해 + 바깥으로 튕김 (같은 적은 ENTRY_HIT_GAP 간격). */
+    private void hitEntering(Player p) {
+        double r2 = RADIUS * RADIUS;
+        Map<UUID, Boolean> now = new HashMap<>();
+        for (LivingEntity e : Targets.enemiesAround(p, center, RADIUS + 3)) {
+            UUID id = e.getUniqueId();
+            boolean inside = e.getLocation().distanceSquared(center) <= r2;
+            now.put(id, inside);
+            Boolean was = enemyInside.get(id);
+            if (!inside || was == null || was) continue;
+            Integer last = enemyLastHit.get(id);
+            if (last != null && ticks - last < ENTRY_HIT_GAP) continue;
+            enemyLastHit.put(id, ticks);
+            Damage.skill(p, e, fever.getAsBoolean() ? ENTRY_DAMAGE_FEVER : ENTRY_DAMAGE);
+            Targets.push(e, center, 0.7, 0.3);
+            Location l = e.getLocation().add(0, 1, 0);
+            l.getWorld().spawnParticle(Particle.ENCHANTED_HIT, l, 10, 0.3, 0.4, 0.3, 0.1);
+            Fx.sound(l, Sound.ITEM_SHIELD_BLOCK, 0.7f, 0.9f);
+        }
+        enemyInside = now;
+        if (ticks % 40 == 0) enemyLastHit.values().removeIf(t -> ticks - t >= ENTRY_HIT_GAP);
     }
 
     /** 돔 밖에서 안으로 들어오는 투사체 차단. */
@@ -188,6 +221,8 @@ final class Sanctuary {
         ended = true;
         if (task != null) task.cancel();
         projectileInside.clear();
+        enemyInside.clear();
+        enemyLastHit.clear();
         for (ItemDisplay d : shields) if (d.isValid()) d.remove();
         shields.clear();
         // 성역이 건 재생은 궁극기 종료와 함께 제거
@@ -228,7 +263,7 @@ final class Sanctuary {
                 e.setItemDisplayTransform(ItemDisplay.ItemDisplayTransform.FIXED);
                 e.setPersistent(false);
                 e.setRotation(at.getYaw(), 0);
-                e.setTeleportDuration(2);
+                e.setTeleportDuration(1);
                 e.setBrightness(new org.bukkit.entity.Display.Brightness(15, 15));
                 e.setTransformation(new Transformation(new Vector3f(), new Quaternionf(),
                         new Vector3f(1.6f, 1.6f, 1.6f), new Quaternionf(new AxisAngle4f())));

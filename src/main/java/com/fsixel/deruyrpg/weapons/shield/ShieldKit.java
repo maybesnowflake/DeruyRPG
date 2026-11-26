@@ -522,7 +522,7 @@ public final class ShieldKit implements WeaponKit, Listener {
 
         UUID id = p.getUniqueId();
         Sanctuary[] holder = new Sanctuary[1];
-        Sanctuary s = new Sanctuary(p, () -> sanctuaries.remove(id, holder[0]));
+        Sanctuary s = new Sanctuary(p, ctx::isFever, () -> sanctuaries.remove(id, holder[0]));
         holder[0] = s;
         sanctuaries.put(id, s);
         s.start(ctx.plugin());
