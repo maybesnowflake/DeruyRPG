@@ -126,6 +126,13 @@ public final class Targets {
         return kr == null || kr.getValue() < 1.0;
     }
 
+    /** 스킬로 적의 속도를 직접 바꿀 때 사용 — 넉백 면역(canMove false)이면 무시. 바뀌었으면 true. */
+    public static boolean velocity(LivingEntity target, Vector v) {
+        if (!canMove(target)) return false;
+        target.setVelocity(v);
+        return true;
+    }
+
     /** 대상을 center 쪽으로 당김 (strength ≈ 0.3~1.5). 넉백 면역이면 무시. */
     public static void pull(LivingEntity target, Location center, double strength) {
         if (!canMove(target)) return;

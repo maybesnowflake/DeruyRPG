@@ -91,6 +91,10 @@ public final class RpgCommand implements TabExecutor {
                         sender.sendMessage(Component.text("숫자를 입력하세요", NamedTextColor.RED));
                         return true;
                     }
+                    if (!Double.isFinite(v)) {
+                        sender.sendMessage(Component.text("올바른 숫자를 입력하세요", NamedTextColor.RED));
+                        return true;
+                    }
                     if (!plugin.fever().setOption(args[1].toLowerCase(), v)) {
                         sender.sendMessage(Component.text("항목: max, hit, hurt, skill, interval", NamedTextColor.RED));
                         return true;

@@ -102,13 +102,17 @@ public final class InputListener implements Listener {
 
         Player attacker = null;
         boolean melee = false;
+        boolean projectile = false;
         if (e.getDamager() instanceof Player p) {
             attacker = p;
             melee = !Damage.isSkillDamage() && e.getCause() == EntityDamageEvent.DamageCause.ENTITY_ATTACK;
         } else if (e.getDamager() instanceof Projectile proj && proj.getShooter() instanceof Player p) {
             attacker = p;
+            projectile = true;
         }
         if (attacker == null) return;
+        // 가시(THORNS)·휩쓸기 등 평타/투사체/스킬이 아닌 피해는 게이지·평타 처리 대상 아님
+        if (!melee && !projectile && !Damage.isSkillDamage()) return;
 
         ItemStack item = attacker.getInventory().getItemInMainHand();
         WeaponKit kit = plugin.kits().find(item);
@@ -167,7 +171,7 @@ public final class InputListener implements Listener {
         }
         if (!fever.isFull(p)) {
             p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.6f, 0.6f);
-            HudTask.flash(p, Component.text("궁극기 게이지 부족 (" + (int) fever.get(p) + "%)", NamedTextColor.GRAY), 30);
+            HudTask.flash(p, Component.text("궁극기 게이지 부족 (" + (int) (fever.get(p) / fever.max() * 100) + "%)", NamedTextColor.GRAY), 30);
             return;
         }
         fever.consume(p, kit.feverDurationTicks(), kit.id());

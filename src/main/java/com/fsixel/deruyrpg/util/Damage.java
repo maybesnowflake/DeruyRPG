@@ -85,6 +85,7 @@ public final class Damage {
                 .withDirectEntity(attacker)
                 .build();
         boolean prev = SKILL.get();
+        boolean prevPassed = PASSED.get();
         SKILL.set(true);
         PASSED.set(false);
         try {
@@ -92,7 +93,7 @@ public final class Damage {
             return PASSED.get();
         } finally {
             SKILL.set(prev);
-            PASSED.set(false);
+            PASSED.set(prevPassed); // 중첩 호출이 바깥 결과를 지우지 않게
         }
     }
 
@@ -108,7 +109,7 @@ public final class Damage {
                 .withDirectEntity(attacker)
                 .build();
         EntityDamageByEntityEvent probe = new EntityDamageByEntityEvent(attacker, target,
-                EntityDamageEvent.DamageCause.ENTITY_ATTACK, source, 0.0001);
+                EntityDamageEvent.DamageCause.ENTITY_ATTACK, source, 0.0); // 피해 0 — 전투태그·킬판정 플러그인 영향 최소화
         boolean prevProbe = PROBE.get();
         boolean prevSkill = SKILL.get();
         PROBE.set(true);

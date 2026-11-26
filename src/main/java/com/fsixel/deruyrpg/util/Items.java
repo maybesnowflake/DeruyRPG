@@ -27,8 +27,9 @@ public final class Items {
     }
 
     public static @Nullable String kitId(@Nullable ItemStack item) {
-        if (item == null || item.getType().isAir() || !item.hasItemMeta()) return null;
-        return item.getItemMeta().getPersistentDataContainer().get(WEAPON_KEY, PersistentDataType.STRING);
+        if (item == null || item.getType().isAir()) return null;
+        // 읽기 전용 뷰 — getItemMeta() 복제 없이 빠르게
+        return item.getPersistentDataContainer().get(WEAPON_KEY, PersistentDataType.STRING);
     }
 
     /**
