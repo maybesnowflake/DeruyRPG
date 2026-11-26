@@ -29,6 +29,7 @@ import org.bukkit.event.entity.EntityChangeBlockEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDropItemEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
@@ -73,8 +74,10 @@ public final class MaceKit implements WeaponKit, Listener {
     private static final int QUAKE_DIVE_TIMEOUT = 60;
     private static final int QUAKE_STUN = 10;             // 0.5초 기절
 
-    /** 도약/지진 착지 대기 중인 작업. */
+    /** 도약 강타 착지 대기 중인 작업 (무기 해제 시 취소). */
     private final Map<UUID, BukkitTask> landing = new ConcurrentHashMap<>();
+    /** 궁극기(지진) 내리꽂기 착지 대기 — 무기 해제와 무관하게 끝까지 진행 (종료·사망·접속 종료 때만 정리). */
+    private final Map<UUID, BukkitTask> quakeDive = new ConcurrentHashMap<>();
     /** 낙하 피해 무효 만료 틱. */
     private final Map<UUID, Integer> noFallUntil = new ConcurrentHashMap<>();
     /** 지진 연출용 FallingBlock (블록 설치 금지 대상). */
@@ -134,7 +137,7 @@ public final class MaceKit implements WeaponKit, Listener {
     @Override
     public void onRightClick(SkillContext ctx) {
         Player p = ctx.player();
-        if (landing.containsKey(p.getUniqueId())) return;
+        if (landing.containsKey(p.getUniqueId()) || quakeDive.containsKey(p.getUniqueId())) return;
         // 피버: 쿨다운 0 (착지 전 재사용은 위 체크로 막힘)
         if (!ctx.isFever() && !ctx.tryCooldown(Slot.RIGHT, LEAP_CD)) return;
         ctx.cancelVanilla();
@@ -149,14 +152,14 @@ public final class MaceKit implements WeaponKit, Listener {
         Fx.burst(at.clone().add(0, 0.2, 0), Particle.CLOUD, 12, 0.3);
 
         boolean fever = ctx.isFever();
-        waitForLanding(ctx.plugin(), p, LEAP_TIMEOUT, () -> leapSlam(p, fever));
+        waitForLanding(ctx.plugin(), p, landing, LEAP_TIMEOUT, () -> leapSlam(p, fever));
     }
 
     private void leapSlam(Player p, boolean fever) {
         Location c = p.getLocation();
         double dmg = fever ? LEAP_DAMAGE_FEVER : LEAP_DAMAGE;
         for (LivingEntity e : Targets.enemiesAround(p, c, LEAP_RADIUS)) {
-            Damage.skill(p, e, dmg);
+            if (!Damage.skill(p, e, dmg)) continue;   // 피해가 들어간 대상만 띄우기
             Targets.push(e, c, 0.45, 0.75);
         }
         Fx.sound(c, Sound.ITEM_MACE_SMASH_GROUND_HEAVY, 1f, 0.9f);
@@ -173,7 +176,7 @@ public final class MaceKit implements WeaponKit, Listener {
         Player p = ctx.player();
         ctx.cancelVanilla();
         if (isGrounded(p)) {
-            p.sendActionBar(Component.text("돌풍은 공중에서만 쓸 수 있습니다", NamedTextColor.GRAY));
+            ctx.flash(Component.text("돌풍은 공중에서만 쓸 수 있습니다", NamedTextColor.GRAY));
             return;
         }
         UUID id = p.getUniqueId();
@@ -238,7 +241,8 @@ public final class MaceKit implements WeaponKit, Listener {
     @Override
     public void onUltimate(SkillContext ctx) {
         Player p = ctx.player();
-        cancelLanding(p.getUniqueId());
+        cancelLanding(landing, p.getUniqueId());
+        cancelLanding(quakeDive, p.getUniqueId());
         if (isGrounded(p)) {
             earthquake(ctx.plugin(), p);
             return;
@@ -247,7 +251,7 @@ public final class MaceKit implements WeaponKit, Listener {
         p.setVelocity(new Vector(0, -1.6, 0));
         Fx.sound(p.getLocation(), Sound.ITEM_MACE_SMASH_AIR, 1f, 0.6f);
         DeruyRPG plugin = ctx.plugin();
-        waitForLanding(plugin, p, QUAKE_DIVE_TIMEOUT, () -> earthquake(plugin, p));
+        waitForLanding(plugin, p, quakeDive, QUAKE_DIVE_TIMEOUT, () -> earthquake(plugin, p));
     }
 
     private void earthquake(DeruyRPG plugin, Player p) {
@@ -261,7 +265,7 @@ public final class MaceKit implements WeaponKit, Listener {
         for (int i = 1; i <= QUAKE_WAVES; i++) {
             final int radius = i;
             Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                if (!p.isOnline()) return;
+                if (!p.isOnline() || p.isDead()) return;
                 quakeWave(plugin, p, center, radius, hit);
             }, (long) (i - 1) * QUAKE_WAVE_INTERVAL);
         }
@@ -288,7 +292,7 @@ public final class MaceKit implements WeaponKit, Listener {
             double d = horizontalDist(e.getLocation(), center);
             if (d < inner || d > outer || Math.abs(e.getLocation().getY() - center.getY()) > 3) continue;
             if (!hit.add(e.getUniqueId())) continue;
-            Damage.skill(p, e, QUAKE_DAMAGE);
+            if (!Damage.skill(p, e, QUAKE_DAMAGE)) continue;   // 피해가 들어간 대상만 기절·띄우기
             Cc.stun(e, QUAKE_STUN);               // 기절 먼저 (stun 이 속도를 초기화하므로)
             Targets.push(e, center, 0.3, 1.0);
             Fx.burst(e.getLocation().add(0, 0.5, 0), Particle.CRIT, 10, 0.4);
@@ -335,7 +339,8 @@ public final class MaceKit implements WeaponKit, Listener {
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onQuakeBlockLand(EntityChangeBlockEvent e) {
         if (!(e.getEntity() instanceof FallingBlock fb)) return;
-        if (!quakeBlocks.remove(fb.getUniqueId())) return;
+        // 우리 지진 블록 (집합에서 빠졌어도 연출 표시가 있으면 설치 금지)
+        if (!quakeBlocks.remove(fb.getUniqueId()) && !Targets.isSummon(fb)) return;
         e.setCancelled(true);
         fb.remove();
     }
@@ -350,37 +355,38 @@ public final class MaceKit implements WeaponKit, Listener {
     // ================= 착지 처리 =================
 
     /** 이륙을 기다렸다가 착지하면 onLand 실행. 대기 중·착지 직후 낙하 피해 무효. */
-    private void waitForLanding(DeruyRPG plugin, Player p, int timeout, Runnable onLand) {
+    private void waitForLanding(DeruyRPG plugin, Player p, Map<UUID, BukkitTask> map, int timeout, Runnable onLand) {
         UUID id = p.getUniqueId();
-        cancelLanding(id);
+        cancelLanding(map, id);
         noFallUntil.put(id, Bukkit.getCurrentTick() + timeout + 10);
         final int[] age = {0};
         BukkitTask task = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
             age[0]++;
             if (!p.isOnline() || p.isDead()) {
-                cancelLanding(id);
+                cancelLanding(map, id);
                 return;
             }
             if (age[0] > 3 && isGrounded(p)) {
-                cancelLanding(id);
+                cancelLanding(map, id);
                 noFallUntil.put(id, Bukkit.getCurrentTick() + 5);
                 onLand.run();
                 return;
             }
             if (age[0] > timeout) {
-                cancelLanding(id);
+                cancelLanding(map, id);
             }
         }, 1L, 1L);
-        landing.put(id, task);
+        map.put(id, task);
     }
 
-    private void cancelLanding(UUID id) {
-        BukkitTask t = landing.remove(id);
+    private static void cancelLanding(Map<UUID, BukkitTask> map, UUID id) {
+        BukkitTask t = map.remove(id);
         if (t != null) t.cancel();
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onFall(EntityDamageEvent e) {
+        if (Damage.isProbe()) return;
         if (e.getCause() != EntityDamageEvent.DamageCause.FALL) return;
         if (!(e.getEntity() instanceof Player p)) return;
         Integer until = noFallUntil.get(p.getUniqueId());
@@ -413,11 +419,25 @@ public final class MaceKit implements WeaponKit, Listener {
                 radius / 2, 0.1, radius / 2, 0.15, below.getBlockData());
     }
 
+    /**
+     * 무기 해제 (여러 번 불려도 안전). 도약 착지 대기·피버 돌풍만 정리.
+     * 궁극기(지진) 내리꽂기·파동은 끝까지 진행. 낙하 피해 무효는 시간 만료로 자연 정리 (공중에서 바꿔 들어도 보호).
+     */
     @Override
     public void onUnequip(Player player) {
-        UUID id = player.getUniqueId();
-        cancelLanding(id);
-        noFallUntil.remove(id);
+        cancelLanding(landing, player.getUniqueId());
         finishGust(player);
+    }
+
+    /** 접속 종료: 남은 상태 전부 정리. */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onQuit(PlayerQuitEvent e) {
+        UUID id = e.getPlayer().getUniqueId();
+        cancelLanding(landing, id);
+        cancelLanding(quakeDive, id);
+        noFallUntil.remove(id);
+        BukkitTask t = gustLandWatch.remove(id);
+        if (t != null) t.cancel();
+        gustAirUses.remove(id);
     }
 }
