@@ -70,14 +70,14 @@ final class SpearFx {
      * delay 틱 후 출발 (여러 개를 엇갈리게 찌를 때).
      */
     static void miniThrust(SpearKit kit, Player owner, Plugin plugin, Location from, Vector dir,
-                           double distance, float scale, long delay) {
+                           double distance, float scale, long delay, boolean track) {
         Runnable run = () -> {
             if (!owner.isOnline()) return;
             Vector d = dir.clone().normalize();
             // 시작: 살짝 뒤로 당겨진 상태
             Vector3f back = toV3(d.clone().multiply(-0.3));
             ItemDisplay disp = spawn(from, d, scale, back);
-            kit.track(owner, disp);
+            if (track) kit.track(owner, disp);
             int travel = distance > 4.5 ? 3 : 2; // 긴 찌르기는 한 틱 더 길게 보간
             plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
                 if (!disp.isValid()) return;
@@ -97,7 +97,7 @@ final class SpearFx {
             }, 1L + travel);
             plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
                 if (disp.isValid()) disp.remove();
-                kit.untrack(owner, disp);
+                if (track) kit.untrack(owner, disp);
             }, 3L + travel);
         };
         if (delay <= 0) run.run();

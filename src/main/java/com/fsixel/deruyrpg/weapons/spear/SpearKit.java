@@ -22,7 +22,12 @@ import org.bukkit.entity.Entity;
 import org.bukkit.entity.ItemDisplay;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.inventory.EquipmentSlotGroup;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
@@ -43,9 +48,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * 우 연속 찌르기 : 3틱 간격 5회 전방 찌르기.
  * 좌 찌르기     : 바닐라 평타 (P 보너스만 적용).
  * ⇧우 큰 창     : 거대 ItemDisplay 창이 앞으로 뻗으며 3×5 관통.
- * F  고대 군단  : {@link AncientLegion}.
+ * F  고대 군단  : {@link AncientLegion} — 자체 타이머로 끝까지 진행 (무기를 놓아도 안 끊김).
+ *
+ * 피버 사거리(+0.5)는 이 창으로 시작한 피버(ctx.isFever)일 때 들고 있는 동안만 적용.
+ * 무기를 놓으면(onUnequip) attribute·아이템 attack_range 를 원래대로, 다시 들면 피버가 남아 있을 때 재적용.
  */
-public final class SpearKit implements WeaponKit {
+public final class SpearKit implements WeaponKit, Listener {
 
     static final NamespacedKey REACH_KEY = new NamespacedKey("deruyrpg", "spear_reach");
     static final NamespacedKey FEVER_REACH_KEY = new NamespacedKey("deruyrpg", "spear_fever_reach");
@@ -158,16 +166,27 @@ public final class SpearKit implements WeaponKit {
                 inst.removeModifier(FEVER_REACH_KEY);
             }
         }
+        // 들고 있는 창만 피버 사거리, 나머지 창(인벤토리·커서)은 항상 원래 사거리.
         PlayerInventory inv = p.getInventory();
-        if (on) {
-            ItemStack hand = inv.getItemInMainHand();
-            if (syncItemRange(hand, true)) inv.setItemInMainHand(hand);
-        } else {
-            ItemStack[] contents = inv.getContents();
-            for (int i = 0; i < contents.length; i++) {
-                if (syncItemRange(contents[i], false)) inv.setItem(i, contents[i]);
-            }
+        int held = inv.getHeldItemSlot();
+        ItemStack[] contents = inv.getContents();
+        for (int i = 0; i < contents.length; i++) {
+            if (syncItemRange(contents[i], on && i == held)) inv.setItem(i, contents[i]);
         }
+        ItemStack cursor = p.getItemOnCursor();
+        if (syncItemRange(cursor, false)) p.setItemOnCursor(cursor);
+    }
+
+    // 버려지거나 사망으로 떨어진 창은 피버 사거리 제거 (주운 사람에게 남지 않게)
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onDrop(PlayerDropItemEvent e) {
+        ItemStack stack = e.getItemDrop().getItemStack();
+        if (syncItemRange(stack, false)) e.getItemDrop().setItemStack(stack);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onDeath(PlayerDeathEvent e) {
+        for (ItemStack stack : e.getDrops()) syncItemRange(stack, false);
     }
 
     @Override
@@ -271,12 +290,12 @@ public final class SpearKit implements WeaponKit {
         p.swingMainHand();
         Location eye = p.getEyeLocation();
         Vector dir = eye.getDirection();
-        miniSpears(p, eye.clone().subtract(0, 0.25, 0), dir, JAB_LENGTH - 1.2, 3, n); // 창끝이 약 7.5칸까지
+        miniSpears(p, eye.clone().subtract(0, 0.25, 0), dir, JAB_LENGTH - 1.2, 3, n, false); // 창끝이 약 7.5칸까지
         Fx.sound(eye, Sound.ITEM_SPEAR_ATTACK, 0.7f, 1.3f + n * 0.06f);
 
         for (LivingEntity t : Targets.frontBox(p, 1.6, JAB_LENGTH, 2.2)) {
             t.setNoDamageTicks(0);
-            Damage.skill(p, t, dmg);
+            if (!Damage.skill(p, t, dmg)) continue;
             t.setVelocity(t.getVelocity().multiply(0.2)); // 연타 중 너무 멀리 밀리지 않게
             Fx.burst(t.getLocation().add(0, t.getHeight() * 0.6, 0), Particle.CRIT, 4, 0.2);
         }
@@ -285,8 +304,9 @@ public final class SpearKit implements WeaponKit {
     /**
      * 작은 창 여러 개가 origin 앞에서 dir 방향으로 빠르게 찌르고 사라지는 연출.
      * (플레이어 연속 찌르기와 고대 군단 병사 찌르기가 같이 씀)
+     * ultimate=true 면 onUnequip 정리 대상에 넣지 않음 (궁극기는 자체 타이머로 끝까지).
      */
-    void miniSpears(Player owner, Location origin, Vector dir, double distance, int count, int seed) {
+    void miniSpears(Player owner, Location origin, Vector dir, double distance, int count, int seed, boolean ultimate) {
         Vector d = dir.clone().normalize();
         Vector right = new Vector(-d.getZ(), 0, d.getX());
         if (right.lengthSquared() < 1e-6) right = new Vector(1, 0, 0);
@@ -298,7 +318,7 @@ public final class SpearKit implements WeaponKit {
             double vert = r.nextDouble(-0.25, 0.25);
             Location from = origin.clone().add(d.clone().multiply(0.9))
                     .add(right.clone().multiply(side)).add(up.clone().multiply(vert));
-            SpearFx.miniThrust(this, owner, com.fsixel.deruyrpg.DeruyRPG.get(), from, d, distance, 0.55f, i % 2);
+            SpearFx.miniThrust(this, owner, com.fsixel.deruyrpg.DeruyRPG.get(), from, d, distance, 0.55f, i % 2, !ultimate);
         }
     }
 
@@ -349,7 +369,7 @@ public final class SpearKit implements WeaponKit {
             Fx.sound(tip, Sound.ENTITY_PLAYER_ATTACK_KNOCKBACK, 1.0f, 0.6f);
             for (LivingEntity t : Targets.frontBox(p, 3, 5, 2.5)) {
                 t.setNoDamageTicks(0);
-                Damage.skill(p, t, dmg);
+                if (!Damage.skill(p, t, dmg)) continue;
                 t.setVelocity(fwd.clone().multiply(0.9).setY(0.3));
                 Fx.burst(t.getLocation().add(0, t.getHeight() * 0.6, 0), Particle.ENCHANTED_HIT, 12, 0.3);
             }
@@ -391,6 +411,10 @@ public final class SpearKit implements WeaponKit {
         if (l != null) l.remove(e);
     }
 
+    /**
+     * 무기 해제(슬롯 변경·버리기·사망·접속 종료 등, 여러 번 불려도 안전).
+     * 피버 사거리 해제 + 일반 스킬(연속 찌르기·큰 창) 정리. 고대 군단(궁극기)은 건드리지 않음.
+     */
     @Override
     public void onUnequip(Player player) {
         setFeverReach(player, false);
