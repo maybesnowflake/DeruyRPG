@@ -34,6 +34,7 @@ import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
+import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -47,10 +48,13 @@ import java.util.concurrent.ConcurrentHashMap;
  * 도끼 (광전사) — 스킬 명세: docs/SKILLS.md 의 "도끼" 항목.
  *
  * P  광폭화   : 체력이 낮을수록 공격력·공격 속도 증가 (체력 30% 이하에서 최대). 무기를 놓으면 제거.
- * 우 회전 베기 : 주변 4×4 범위 공격 + 방패 무력화. 내 체력 2(1칸) 소모.
- * 좌 내려찍기 : 평타. 준 피해의 약 15% 회복.
- * ⇧우 피의 도끼: 전방 적에게 출혈 도트 + 나에게 힘 II 5초.
- * F  처형     : 체력 20% 이하 적 처형 + 피버 동안 힘 + CC 무시.
+ * 우 회전 베기 : 주변 4×4 범위 공격 + 방패 무력화. 내 체력 2(1칸) 소모. 도끼 3자루가 주변을 한 바퀴 돎.
+ * 좌 내려찍기 : 평타. 준 피해의 약 3.75% 회복.
+ * ⇧우 피의 도끼: 큰 도끼를 앞으로 내려찍어 전방 적에게 출혈 도트 + 나에게 힘 II 5초.
+ * F  처형     : 큰 도끼가 반경 6칸을 한 바퀴 휩씀. 체력 20% 이하 적 처형 + 피버 동안 힘 + CC 무시.
+ *
+ * 피버(15초): 흡혈 ×2, 평타가 주변 2칸 전방위 공격(작은 도끼 회전), 신속 III,
+ *            회전 베기 체력 소모 없음 + 범위 6×6(±3칸).
  */
 public final class AxeKit implements WeaponKit, Listener {
 
@@ -62,11 +66,14 @@ public final class AxeKit implements WeaponKit, Listener {
     private static final int SPIN_COOLDOWN = 100;         // 5초
     private static final double SPIN_HP_COST = 2.0;       // 체력 1칸
     private static final double SPIN_HALF = 2.0;          // 4×4 → 중심에서 ±2칸
+    private static final double SPIN_HALF_FEVER = 3.0;    // 피버: 6×6 → ±3칸
     private static final double SPIN_DAMAGE = 7.0;
     private static final int SHIELD_DISABLE_TICKS = 100;
 
-    private static final double LIFESTEAL = 0.15;
-    private static final double LIFESTEAL_FEVER = 0.20;
+    private static final double LIFESTEAL = 0.0375;              // 15% 에서 75% 감소
+    private static final double LIFESTEAL_FEVER = LIFESTEAL * 2; // 피버: 흡혈량 +100%
+    private static final double FEVER_SWEEP_RADIUS = 2.0;        // 피버 평타 전방위 반경
+    private static final double FEVER_AIR_SWING_RATIO = 0.8;     // 허공 스윙 전방위 피해 = 공격력 × 0.8
 
     private static final int BLOOD_COOLDOWN = 240;        // 12초
     private static final double BLOOD_HIT = 5.0;
@@ -95,6 +102,9 @@ public final class AxeKit implements WeaponKit, Listener {
     private final Map<UUID, BukkitTask> unstoppable = new ConcurrentHashMap<>();
     /** 출혈 중인 대상 → 도트 작업. */
     private final Map<UUID, BukkitTask> bleeds = new ConcurrentHashMap<>();
+    /** 피버 전방위 평타 마지막 발동 틱 (허공 스윙 남용 방지). */
+    private final Map<UUID, Integer> lastSweep = new ConcurrentHashMap<>();
+    private final AxeDisplays displays = new AxeDisplays();
     private BukkitTask sweeper;
     private int passiveCounter;
 
@@ -141,6 +151,14 @@ public final class AxeKit implements WeaponKit, Listener {
         double t = Math.max(0, Math.min(1, (1 - ratio) / (1 - RAGE_FULL_AT)));
         t = Math.round(t * 20) / 20.0;
         applyRage(p, t);
+
+        // 피버: 신속 III
+        if (ctx.isFever()) {
+            PotionEffect cur = p.getPotionEffect(PotionEffectType.SPEED);
+            if (cur == null || (cur.getAmplifier() <= 2 && cur.getDuration() < 10)) {
+                p.addPotionEffect(new PotionEffect(PotionEffectType.SPEED, 15, 2, true, false, true));
+            }
+        }
 
         if (t >= 1 && (++passiveCounter % 4 == 0)) {
             p.getWorld().spawnParticle(Particle.DUST, p.getLocation().add(0, 1, 0), 6, 0.35, 0.5, 0.35, 0,
@@ -189,24 +207,36 @@ public final class AxeKit implements WeaponKit, Listener {
     public void onRightClick(SkillContext ctx) {
         ctx.cancelVanilla(); // 통나무 벗기기 등 바닐라 동작 방지
         Player p = ctx.player();
-        if (p.getHealth() - SPIN_HP_COST < 1.0) {
+        boolean fever = ctx.isFever();
+        if (!fever && p.getHealth() - SPIN_HP_COST < 1.0) {
             p.sendActionBar(Component.text("체력이 부족해 회전 베기를 쓸 수 없다", NamedTextColor.RED));
             Fx.sound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.6f, 0.6f);
             return;
         }
         if (!ctx.tryCooldown(Slot.RIGHT, SPIN_COOLDOWN)) return;
 
-        p.setHealth(Math.max(1.0, p.getHealth() - SPIN_HP_COST));
-        Fx.burst(p.getLocation().add(0, 1, 0), Particle.DAMAGE_INDICATOR, 4, 0.3);
+        if (!fever) {
+            // 체력 소모 + 피 튀는 연출
+            p.setHealth(Math.max(1.0, p.getHealth() - SPIN_HP_COST));
+            p.playHurtAnimation(0);
+            Location body = p.getLocation().add(0, 1, 0);
+            p.getWorld().spawnParticle(Particle.BLOCK, body, 30, 0.3, 0.45, 0.3, 0, BLOOD);
+            p.getWorld().spawnParticle(Particle.DAMAGE_INDICATOR, body, 4, 0.3, 0.3, 0.3, 0.1);
+            p.getWorld().spawnParticle(Particle.DUST, body, 12, 0.35, 0.5, 0.35, 0,
+                    new Particle.DustOptions(Color.fromRGB(150, 0, 0), 1.3f));
+            Fx.sound(p.getLocation(), Sound.ENTITY_PLAYER_HURT, 1f, 0.8f);
+            Fx.sound(p.getLocation(), Sound.BLOCK_HONEY_BLOCK_BREAK, 0.7f, 0.6f);
+        }
 
+        double half = fever ? SPIN_HALF_FEVER : SPIN_HALF;
         Location c = p.getLocation();
-        double dmg = ctx.isFever() ? SPIN_DAMAGE + 2 : SPIN_DAMAGE;
-        for (LivingEntity e : Targets.enemiesAround(p, c, SPIN_HALF * 1.5 + 0.5)) {
+        double dmg = fever ? SPIN_DAMAGE + 2 : SPIN_DAMAGE;
+        for (LivingEntity e : Targets.enemiesAround(p, c, half * 1.5 + 0.5)) {
             Location l = e.getLocation();
             double dx = Math.abs(l.getX() - c.getX());
             double dz = Math.abs(l.getZ() - c.getZ());
             double dy = l.getY() - c.getY();
-            if (dx > SPIN_HALF + 0.3 || dz > SPIN_HALF + 0.3 || dy < -1.5 || dy > 2.5) continue;
+            if (dx > half + 0.3 || dz > half + 0.3 || dy < -1.5 || dy > 2.5) continue;
 
             if (e instanceof Player tp) {
                 tp.setCooldown(Material.SHIELD, SHIELD_DISABLE_TICKS);
@@ -223,15 +253,12 @@ public final class AxeKit implements WeaponKit, Listener {
             Fx.burst(e.getLocation().add(0, 1, 0), Particle.CRIT, 8, 0.3);
         }
 
-        // 연출: 2바퀴 휩쓸기 링
-        for (int i = 0; i < 8; i++) {
-            double a = Math.PI * 2 * i / 8;
-            Location l = c.clone().add(Math.cos(a) * 1.8, 1.0, Math.sin(a) * 1.8);
-            p.getWorld().spawnParticle(Particle.SWEEP_ATTACK, l, 1, 0, 0, 0, 0);
-        }
-        Fx.ring(c, Particle.CRIT, 2.2, 24);
+        // 연출: 도끼 3자루가 빠르게 한 바퀴
+        displays.orbit(ctx.plugin(), p, 3, half + 0.2, 1.3f, 1.0, 8, 1.0, Particle.SWEEP_ATTACK, null);
+        Fx.ring(c, Particle.CRIT, half + 0.2, 24);
         Fx.sound(c, Sound.ENTITY_PLAYER_ATTACK_SWEEP, 1f, 0.7f);
         Fx.sound(c, Sound.ITEM_AXE_SCRAPE, 0.8f, 0.6f);
+        Fx.sound(c, Sound.ITEM_TRIDENT_RIPTIDE_1, 0.6f, 1.4f);
     }
 
     // =====================================================================
@@ -241,17 +268,57 @@ public final class AxeKit implements WeaponKit, Listener {
     @Override
     public void onMeleeHit(SkillContext ctx, LivingEntity target, EntityDamageByEntityEvent event) {
         Player p = ctx.player();
+        if (p.isDead()) return;
+        boolean fever = ctx.isFever();
         double dealt = Math.min(event.getFinalDamage(), target.getHealth());
-        if (dealt <= 0 || p.isDead()) return;
-        double heal = dealt * (ctx.isFever() ? LIFESTEAL_FEVER : LIFESTEAL);
-        double max = maxHealth(p);
-        if (p.getHealth() < max) {
-            p.setHealth(Math.min(max, p.getHealth() + heal));
-            if (heal >= 1.0) {
-                p.getWorld().spawnParticle(Particle.HEART, p.getLocation().add(0, 2.1, 0), 1, 0.2, 0.1, 0.2, 0);
-            }
-        }
+        if (dealt > 0) lifesteal(p, dealt, fever);
         target.getWorld().spawnParticle(Particle.BLOCK, target.getLocation().add(0, 1, 0), 6, 0.25, 0.3, 0.25, 0, BLOOD);
+
+        // 피버: 전방위 평타
+        if (fever && event.getDamage() > 0) {
+            feverSweep(ctx, event.getDamage(), target);
+        }
+    }
+
+    /** 피버 중엔 허공 스윙도 주변 적을 벤다 (공격 속도 기준으로 제한). */
+    @Override
+    public void onLeftClick(SkillContext ctx) {
+        if (!ctx.isFever()) return;
+        Player p = ctx.player();
+        Integer last = lastSweep.get(p.getUniqueId());
+        AttributeInstance spd = p.getAttribute(Attribute.ATTACK_SPEED);
+        int gap = (int) Math.ceil(20.0 / Math.max(0.5, spd == null ? 1.0 : spd.getValue()));
+        if (last != null && Bukkit.getCurrentTick() - last < gap) return;
+        AttributeInstance atk = p.getAttribute(Attribute.ATTACK_DAMAGE);
+        double dmg = (atk == null ? 9.0 : atk.getValue()) * FEVER_AIR_SWING_RATIO;
+        feverSweep(ctx, dmg, null);
+    }
+
+    private void feverSweep(SkillContext ctx, double dmg, LivingEntity exclude) {
+        Player p = ctx.player();
+        lastSweep.put(p.getUniqueId(), Bukkit.getCurrentTick());
+        double total = 0;
+        for (LivingEntity e : Targets.enemiesAround(p, p.getLocation(), FEVER_SWEEP_RADIUS + 0.5)) {
+            if (e.equals(exclude)) continue;
+            double before = e.getHealth();
+            e.setNoDamageTicks(0);
+            Damage.skill(p, e, dmg);
+            total += Math.max(0, before - (e.isDead() ? 0 : e.getHealth()));
+            e.getWorld().spawnParticle(Particle.BLOCK, e.getLocation().add(0, 1, 0), 6, 0.25, 0.3, 0.25, 0, BLOOD);
+        }
+        if (total > 0) lifesteal(p, total, true);
+        displays.orbit(ctx.plugin(), p, 2, FEVER_SWEEP_RADIUS, 0.8f, 1.0, 6, 1.0, null, null);
+        Fx.sound(p.getLocation(), Sound.ENTITY_PLAYER_ATTACK_SWEEP, 0.8f, 1.1f);
+    }
+
+    private void lifesteal(Player p, double dealt, boolean fever) {
+        double heal = dealt * (fever ? LIFESTEAL_FEVER : LIFESTEAL);
+        double max = maxHealth(p);
+        if (heal <= 0 || p.getHealth() >= max) return;
+        p.setHealth(Math.min(max, p.getHealth() + heal));
+        if (heal >= 1.0) {
+            p.getWorld().spawnParticle(Particle.HEART, p.getLocation().add(0, 2.1, 0), 1, 0.2, 0.1, 0.2, 0);
+        }
     }
 
     // =====================================================================
@@ -266,25 +333,33 @@ public final class AxeKit implements WeaponKit, Listener {
 
         boolean fever = ctx.isFever();
         double tick = fever ? BLEED_TICK_DAMAGE * 1.5 : BLEED_TICK_DAMAGE;
-        List<LivingEntity> hit = Targets.frontBox(p, 3, 4, 2.5);
-        for (LivingEntity e : hit) {
-            e.setNoDamageTicks(0);
-            Damage.skill(p, e, BLOOD_HIT);
-            startBleed(ctx.plugin(), p, e, tick);
-        }
-
         p.addPotionEffect(new PotionEffect(PotionEffectType.STRENGTH, 100, 1, false, true, true));
-
-        // 연출: 전방 붉은 베기
-        Location eye = p.getEyeLocation();
-        Location end = eye.clone().add(eye.getDirection().multiply(4));
-        Fx.line(eye.clone().add(0, -0.4, 0), end, Particle.CRIT, 0.4);
-        p.getWorld().spawnParticle(Particle.BLOCK, end, 25, 0.8, 0.5, 0.8, 0, BLOOD);
-        Fx.sound(p.getLocation(), Sound.ENTITY_PLAYER_ATTACK_STRONG, 1f, 0.6f);
         Fx.sound(p.getLocation(), Sound.ENTITY_WITHER_SHOOT, 0.4f, 1.6f);
-        if (!hit.isEmpty()) {
-            p.sendActionBar(Component.text("출혈! (" + hit.size() + ")", NamedTextColor.DARK_RED));
-        }
+        Fx.sound(p.getLocation(), Sound.ITEM_TRIDENT_THROW, 0.8f, 0.5f);
+
+        // 큰 도끼가 들렸다가 앞으로 내려찍힘 → 닿는 순간 피해
+        Location base = p.getLocation();
+        base.setPitch(0);
+        Vector fwd = base.getDirection();
+        displays.chop(ctx.plugin(), p, 3.0f, () -> {
+            List<LivingEntity> hit = Targets.frontBox(p, 3, 4, 2.5);
+            for (LivingEntity e : hit) {
+                e.setNoDamageTicks(0);
+                Damage.skill(p, e, BLOOD_HIT);
+                startBleed(ctx.plugin(), p, e, tick);
+            }
+            Location impact = base.clone().add(fwd.clone().multiply(3.2)).add(0, 0.2, 0);
+            p.getWorld().spawnParticle(Particle.BLOCK, impact, 40, 0.9, 0.3, 0.9, 0, BLOOD);
+            p.getWorld().spawnParticle(Particle.EXPLOSION, impact, 1, 0, 0, 0, 0);
+            p.getWorld().spawnParticle(Particle.CRIT, impact, 20, 0.8, 0.2, 0.8, 0.3);
+            Fx.ring(impact, Particle.DAMAGE_INDICATOR, 1.5, 12);
+            Fx.sound(impact, Sound.ENTITY_PLAYER_ATTACK_STRONG, 1f, 0.6f);
+            Fx.sound(impact, Sound.BLOCK_ANVIL_LAND, 0.7f, 0.5f);
+            Fx.sound(impact, Sound.ENTITY_GENERIC_EXPLODE, 0.5f, 0.8f);
+            if (!hit.isEmpty()) {
+                p.sendActionBar(Component.text("출혈! (" + hit.size() + ")", NamedTextColor.DARK_RED));
+            }
+        });
     }
 
     private void startBleed(DeruyRPG plugin, Player attacker, LivingEntity target, double perTick) {
@@ -343,8 +418,12 @@ public final class AxeKit implements WeaponKit, Listener {
             }
         }
 
+        // 큰 도끼가 처형 반경을 크게 한 바퀴 휩씀
+        displays.orbit(ctx.plugin(), p, 1, EXECUTE_RADIUS, 3.2f, 1.2, 12, 1.0, Particle.SWEEP_ATTACK,
+                tip -> tip.getWorld().spawnParticle(Particle.BLOCK, tip, 4, 0.2, 0.2, 0.2, 0, BLOOD));
         Fx.ring(c, Particle.DAMAGE_INDICATOR, 3, 30);
         Fx.ring(c, Particle.CRIMSON_SPORE, EXECUTE_RADIUS, 48);
+        Fx.sound(c, Sound.ENTITY_PLAYER_ATTACK_SWEEP, 1f, 0.5f);
         Fx.sound(c, Sound.ENTITY_RAVAGER_ROAR, 1f, 0.9f);
         p.sendActionBar(Component.text(executed > 0 ? "처형! (" + executed + ")" : "광전사의 포효!", NamedTextColor.DARK_RED));
 
@@ -404,6 +483,12 @@ public final class AxeKit implements WeaponKit, Listener {
     public void onUnequip(Player player) {
         clearRage(player);
         stopUnstoppable(player);
+        displays.clear(player);
+        lastSweep.remove(player.getUniqueId());
+        PotionEffect sp = player.getPotionEffect(PotionEffectType.SPEED);
+        if (sp != null && sp.getAmplifier() == 2 && sp.getDuration() <= 15) {
+            player.removePotionEffect(PotionEffectType.SPEED);
+        }
     }
 
     // =====================================================================
