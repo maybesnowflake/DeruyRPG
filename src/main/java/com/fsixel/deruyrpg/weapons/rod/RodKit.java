@@ -69,14 +69,16 @@ public final class RodKit implements WeaponKit, Listener {
     private static final float MANA_SINGLE_BASIC = 0.12f, MANA_SINGLE_CARROT = 0.10f, MANA_SINGLE_FUNGUS = 0.12f;
     private static final float MANA_AOE_BASIC = 0.28f, MANA_AOE_CARROT = 0.25f, MANA_AOE_FUNGUS = 0.30f;
     private static final int CD_AOE_BASIC = 120, CD_AOE_CARROT = 300, CD_AOE_FUNGUS = 300;
-    /** 피버 중: 쿨다운 없음, 대신 마나 소모 배율. */
-    private static final float FEVER_MANA_MUL = 3f;
+    /** 피버 중: 쿨다운 없음 + 최대 마나 300%, 마나 회복 5배 (ManaManager.boost). */
+    private static final float FEVER_MANA_MAX = 3f, FEVER_MANA_REGEN = 5f;
+    /** 우클릭 직후 이 틱 이내의 좌클릭은 무시 (바닐라 낚싯대 우클릭 시 팔 휘두름 → 가짜 LEFT_CLICK_AIR). */
+    private static final int RIGHT_LEFT_GUARD_TICKS = 2;
 
     private static final double FANG_DMG = 8;
     private static final double ZONE_RADIUS = 6;
     private static final int ZONE_TICKS = 120;
     private static final double ULT_RADIUS = 6;
-    private static final double ULT_INSTANT_DMG = 2;
+    private static final double ULT_INSTANT_DMG = 5;
     private static final double ULT_FANG_DMG = 5;
 
     /** 모드별 쿨다운 슬롯 이름. */
@@ -90,6 +92,8 @@ public final class RodKit implements WeaponKit, Listener {
 
     /** 좌클릭 같은 틱 중복 방지 (onMeleeHit + onLeftClick). */
     private final Map<UUID, Integer> lastLeftTick = new ConcurrentHashMap<>();
+    /** 마지막 우클릭(⇧우 포함) 틱. 가짜 좌클릭 판별용. */
+    private final Map<UUID, Integer> lastRightTick = new ConcurrentHashMap<>();
     /** 장판·궁극기 등 진행 중 작업. onUnequip 에서 취소. */
     private final Map<UUID, List<BukkitTask>> tasks = new ConcurrentHashMap<>();
 
@@ -113,7 +117,7 @@ public final class RodKit implements WeaponKit, Listener {
                 "⇧우  모드별 범위 마법",
                 "   기본: 송곳니 두 줄 / 당근: 포화+힘 / 균: 어둠·구속 장판",
                 "F  대마법: 휘감는 송곳니 소용돌이",
-                "피버: 쿨다운 없음, 마나 소모 3배");
+                "피버: 쿨다운 없음, 최대 마나 300%·마나 회복 5배");
         item.editMeta(m -> m.getPersistentDataContainer().set(MODE_KEY, PersistentDataType.INTEGER, BASIC));
         return item;
     }
@@ -138,7 +142,8 @@ public final class RodKit implements WeaponKit, Listener {
     public Component hudExtra(SkillContext ctx) {
         int m = mode(ctx);
         Component c = Component.text("✦ " + MODE_NAME[m], MODE_COLOR[m]);
-        if (ctx.isFever()) c = c.append(Component.text(" 피버: 쿨X 마나x3", NamedTextColor.GOLD));
+        if (ctx.isFever()) c = c.append(Component.text(" 피버: 쿨X 마나 " + Math.round(ctx.mana().get(ctx.player()) * 100) + "%/"
+                + Math.round(ctx.mana().max(ctx.player()) * 100) + "% 회복x5", NamedTextColor.GOLD));
         return c;
     }
 
@@ -159,11 +164,33 @@ public final class RodKit implements WeaponKit, Listener {
         return mode(ctx.player().getInventory().getItemInMainHand());
     }
 
-    /** 좌(허공/블록): 모드 변경. */
+    /**
+     * 좌(허공/블록): 모드 변경.
+     * 바닐라 낚싯대(FISHING_ROD)는 우클릭 시 클라이언트가 팔을 휘두르고(swing 패킷), 서버는 이를
+     * LEFT_CLICK_AIR 로도 처리한다 → 우클릭할 때마다 모드가 바뀌던 원인.
+     * 그래서 최근 우클릭(±2틱) 근처의 좌클릭은 무시하고, 패킷 순서가 뒤바뀐 경우까지 막도록
+     * 실제 전환은 1틱 뒤에 다시 확인 후 수행.
+     */
     @Override
     public void onLeftClick(SkillContext ctx) {
-        if (!firstLeftThisTick(ctx.player())) return;
-        switchMode(ctx.player());
+        Player p = ctx.player();
+        if (!firstLeftThisTick(p)) return;
+        int leftTick = Bukkit.getCurrentTick();
+        if (recentRight(p, leftTick)) return;
+        Bukkit.getScheduler().runTaskLater(ctx.plugin(), () -> {
+            if (!p.isOnline() || recentRight(p, leftTick)) return;
+            switchMode(p);
+        }, 1L);
+    }
+
+    /** leftTick 기준 ±2틱 안에 우클릭이 있었는지. */
+    private boolean recentRight(Player p, int leftTick) {
+        Integer r = lastRightTick.get(p.getUniqueId());
+        return r != null && Math.abs(r - leftTick) <= RIGHT_LEFT_GUARD_TICKS;
+    }
+
+    private void markRight(Player p) {
+        lastRightTick.put(p.getUniqueId(), Bukkit.getCurrentTick());
     }
 
     /** 좌(엔티티 타격): 평타 피해는 그대로, 모드 변경만. */
@@ -212,16 +239,12 @@ public final class RodKit implements WeaponKit, Listener {
     }
 
     /**
-     * 쿨다운·마나 처리. 피버 중엔 쿨다운 없이 마나 3배 소모, 평소엔 슬롯 쿨다운 + 마나.
+     * 쿨다운·마나 처리. 대상 확인 등 발동 조건을 모두 통과한 뒤에만 호출할 것.
+     * 피버 중엔 쿨다운 없이 마나만, 평소엔 쿨·마나 둘 다 OK 일 때만 둘 다 소모 (하나라도 실패하면 아무것도 안 씀).
      */
     private boolean pay(SkillContext ctx, String slot, float mana, int cd) {
-        if (ctx.isFever()) {
-            return ctx.tryMana(Math.min(1f, mana * FEVER_MANA_MUL));
-        }
-        if (ctx.onCooldown(slot)) return false;
-        if (!ctx.tryMana(mana)) return false;
-        ctx.cooldowns().tryUse(ctx.player(), id(), slot, cd);
-        return true;
+        if (ctx.isFever()) return ctx.tryMana(mana);
+        return ctx.tryCooldownAndMana(slot, cd, mana);
     }
 
     private static Color modeColor(int mode) {
@@ -238,6 +261,7 @@ public final class RodKit implements WeaponKit, Listener {
     public void onRightClick(SkillContext ctx) {
         ctx.cancelVanilla();
         Player p = ctx.player();
+        markRight(p);
         int mode = mode(ctx);
 
         if (mode == CARROT) {
@@ -295,6 +319,7 @@ public final class RodKit implements WeaponKit, Listener {
     public void onShiftRightClick(SkillContext ctx) {
         ctx.cancelVanilla();
         Player p = ctx.player();
+        markRight(p);
         int mode = mode(ctx);
 
         switch (mode) {
@@ -389,6 +414,8 @@ public final class RodKit implements WeaponKit, Listener {
     public void onUltimate(SkillContext ctx) {
         Player p = ctx.player();
         UUID id = p.getUniqueId();
+        // 피버 동안 최대 마나 300%, 회복 5배 (시작 시 가득 채움)
+        ctx.mana().boost(p, FEVER_MANA_MAX, FEVER_MANA_REGEN, feverDurationTicks());
         Vector dir = p.getLocation().getDirection().setY(0);
         if (dir.lengthSquared() < 1e-6) dir = new Vector(0, 0, 1);
         dir.normalize();
@@ -589,6 +616,7 @@ public final class RodKit implements WeaponKit, Listener {
     public void onUnequip(Player player) {
         UUID id = player.getUniqueId();
         lastLeftTick.remove(id);
+        lastRightTick.remove(id);
         List<BukkitTask> list = tasks.remove(id);
         if (list != null) {
             synchronized (list) {
