@@ -20,6 +20,9 @@ public final class RoomLibrary {
 
     public record Room(String pool, String name, Structure structure, BlockVector size, Set<String> tags, int weight) {}
 
+    /** 방은 Y=64에 놓이므로 월드 상한(320) 안에 들어가도록 */
+    public static final int MAX_HEIGHT = 250;
+
     private final File dir;
     private final Logger log;
     private final Map<String, List<Room>> pools = new HashMap<>();
@@ -42,6 +45,10 @@ public final class RoomLibrary {
                 try {
                     Structure s = Bukkit.getStructureManager().loadStructure(f);
                     BlockVector size = s.getSize();
+                    if (size.getBlockY() > MAX_HEIGHT) {
+                        log.warning("방 템플릿 " + pd.getName() + "/" + f.getName() + " 높이 " + size.getBlockY() + " > " + MAX_HEIGHT + " — 건너뜀");
+                        continue;
+                    }
                     if (size.getBlockX() > cell || size.getBlockZ() > cell) {
                         log.warning("방 템플릿 " + pd.getName() + "/" + f.getName() + " 이 셀(" + cell + ")보다 큼 — 건너뜀");
                         continue;

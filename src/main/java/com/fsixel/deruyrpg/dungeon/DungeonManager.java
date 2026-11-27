@@ -218,6 +218,10 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
      */
     private void build(Run run, Runnable then) {
         ChapterDef c = run.chapter;
+        // 챕터가 바뀌면 이전 생성 결과는 항상 비움 (고정 맵 챕터로 넘어갈 때 포함)
+        freeZone(run);
+        run.resolved.clear();
+        run.usedRooms.clear();
         boolean any = false;
         for (RoundDef r : c.rounds().values()) if (r.generated()) any = true;
         if (!any) {
@@ -225,9 +229,6 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
             return;
         }
         run.phase = Run.Phase.GENERATING;
-        freeZone(run);
-        run.resolved.clear();
-        run.usedRooms.clear();
         int slot = 0;
         while (slots.contains(slot)) slot++;
         slots.add(slot);
@@ -766,6 +767,8 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
             case "status" -> {
                 if (mine == null) {
                     sender.sendMessage(Component.text("진행 중인 던전 " + runs.size() + "개", NamedTextColor.GRAY));
+                } else if (mine.round == null) {
+                    sender.sendMessage(Component.text(mine.chapter.name() + " · 던전 생성 중...", NamedTextColor.GRAY));
                 } else {
                     sender.sendMessage(Component.text(mine.chapter.name() + " · 스테이지 " + mine.stage + " · " + mine.round.name()
                             + " (" + mine.round.type().label + ") · " + mine.phase, NamedTextColor.GREEN));
