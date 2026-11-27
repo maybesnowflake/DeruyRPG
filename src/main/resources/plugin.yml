@@ -7,8 +7,8 @@ author: Fsixel
 
 commands:
   rpg:
-    description: DeruyRPG 무기 지급·테스트
-    usage: /rpg give <무기|all> [플레이어]
+    description: DeruyRPG 무기 지급·테스트·보스
+    usage: /rpg <give|fever|fevercfg|mana|reset|dummy|boss|list>
     permission: deruyrpg.admin
 
 permissions:
