@@ -36,7 +36,7 @@
 
 ## 테스트 명령
 `/rpg boss setspawn` → `/rpg boss spawn` (또는 `spawn here`, 콘솔 `spawn <world> <x> <y> <z> [yaw] [p2]`)
-`/rpg boss phase2` (각성 연출 바로 보기, 보스 없으면 2페이즈로 소환) · `/rpg boss spawn p2` (2페이즈로 바로)
+`/rpg boss spawn mini` (미니보스: 1페이즈 전용, 능력치 75%, 각성 없이 처치 — 정글 챕터 스테이지 1 끝) · `/rpg boss phase2` (각성 연출 바로 보기, 보스 없으면 2페이즈로 소환) · `/rpg boss spawn p2` (2페이즈로 바로)
 `/rpg boss hp <퍼센트>` · `/rpg boss kill` (처치 연출) · `/rpg boss check` (남은 표시 블록 수 — 처치 후 0) · `/rpg boss clear`
 
 ## 인게임 확인 필요

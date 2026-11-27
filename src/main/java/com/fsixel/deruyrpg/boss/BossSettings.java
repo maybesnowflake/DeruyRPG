@@ -19,6 +19,10 @@ public final class BossSettings {
     public double damageMultiplier = 1.0;
     /** 2페이즈 최대 체력 = health × 이 값 */
     public double phase2HealthMultiplier = 1.5;
+    /** 미니보스(1페이즈 전용) 능력치 배율 — 체력·피해·방어력 */
+    public double miniStatMultiplier = 0.75;
+    /** 이 설정이 미니보스용 복사본인지 (각성 없이 1페이즈에서 처치) */
+    public boolean mini = false;
     /** 보스방 소환 좌표 (없으면 null) */
     public @Nullable Location spawn;
 
@@ -29,6 +33,7 @@ public final class BossSettings {
         armorToughness = Math.max(0.0, Math.min(20.0, sec.getDouble("armor-toughness", armorToughness)));
         damageMultiplier = Math.max(0.0, sec.getDouble("damage-multiplier", damageMultiplier));
         phase2HealthMultiplier = Math.max(0.1, sec.getDouble("phase2-health-multiplier", phase2HealthMultiplier));
+        miniStatMultiplier = Math.max(0.05, sec.getDouble("mini-stat-multiplier", miniStatMultiplier));
         spawn = null;
         ConfigurationSection sp = sec.getConfigurationSection("spawn");
         if (sp != null) {
@@ -41,11 +46,27 @@ public final class BossSettings {
         }
     }
 
+    /** 미니보스용 복사본: 체력·피해·방어력 × miniStatMultiplier. */
+    public BossSettings mini() {
+        BossSettings m = new BossSettings();
+        double k = miniStatMultiplier;
+        m.health = health * k;
+        m.damageMultiplier = damageMultiplier * k;
+        m.armor = armor * k;
+        m.armorToughness = armorToughness * k;
+        m.phase2HealthMultiplier = phase2HealthMultiplier;
+        m.miniStatMultiplier = k;
+        m.spawn = spawn;
+        m.mini = true;
+        return m;
+    }
+
     public void save(ConfigurationSection sec) {
         sec.set("health", health);
         sec.set("armor", armor);
         sec.set("armor-toughness", armorToughness);
         sec.set("damage-multiplier", damageMultiplier);
+        sec.set("mini-stat-multiplier", miniStatMultiplier);
         sec.set("phase2-health-multiplier", phase2HealthMultiplier);
         if (spawn == null || spawn.getWorld() == null) {
             sec.set("spawn", null);

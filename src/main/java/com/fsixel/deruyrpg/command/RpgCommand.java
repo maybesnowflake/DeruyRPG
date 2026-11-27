@@ -133,8 +133,9 @@ public final class RpgCommand implements TabExecutor {
                     sender.sendMessage(Component.text("이미 보스가 있습니다. /rpg boss clear 로 정리 후 다시 소환하세요", NamedTextColor.RED));
                     return;
                 }
-                boolean p2 = args[args.length - 1].equalsIgnoreCase("p2");
-                int n = p2 ? args.length - 1 : args.length; // p2 제외한 인자 수
+                boolean mini = args[args.length - 1].equalsIgnoreCase("mini");
+                boolean p2 = !mini && args[args.length - 1].equalsIgnoreCase("p2");
+                int n = (p2 || mini) ? args.length - 1 : args.length; // p2/mini 제외한 인자 수
                 org.bukkit.Location loc;
                 if (n >= 6) {
                     // /rpg boss spawn <world> <x> <y> <z> [yaw]
@@ -166,8 +167,8 @@ public final class RpgCommand implements TabExecutor {
                     sender.sendMessage(Component.text("보스방 좌표가 없습니다: /rpg boss spawn <world> <x> <y> <z> [yaw] [p2]", NamedTextColor.RED));
                     return;
                 }
-                bosses.spawn(loc, p2);
-                sender.sendMessage(Component.text("이끼 수문장 소환" + (p2 ? " (2페이즈)" : "") + " @ "
+                bosses.spawn(loc, p2, mini);
+                sender.sendMessage(Component.text("이끼 수문장 소환" + (p2 ? " (2페이즈)" : mini ? " (미니보스)" : "") + " @ "
                         + loc.getWorld().getName() + " " + loc.getBlockX() + " " + loc.getBlockY() + " " + loc.getBlockZ(), NamedTextColor.GREEN));
             }
             case "setspawn" -> {
@@ -251,7 +252,7 @@ public final class RpgCommand implements TabExecutor {
                 }
             }
             default -> sender.sendMessage(Component.text(
-                    "/rpg boss spawn [here|<world> <x> <y> <z> [yaw]] [p2] · setspawn · phase2 · kill · clear · check · hp <퍼센트>",
+                    "/rpg boss spawn [here|<world> <x> <y> <z> [yaw]] [p2|mini] · setspawn · phase2 · kill · clear · check · hp <퍼센트>",
                     NamedTextColor.YELLOW));
         }
     }
@@ -274,9 +275,11 @@ public final class RpgCommand implements TabExecutor {
             if (args.length == 3) {
                 out.add("here");
                 out.add("p2");
+                out.add("mini");
                 for (org.bukkit.World w : Bukkit.getWorlds()) out.add(w.getName());
             } else if (args.length == 4 && args[2].equalsIgnoreCase("here")) {
                 out.add("p2");
+                out.add("mini");
             } else if (args.length >= 4 && args.length <= 6 && sender instanceof Player p) {
                 var l = p.getLocation();
                 out.add(String.valueOf(switch (args.length) {
@@ -288,6 +291,7 @@ public final class RpgCommand implements TabExecutor {
                 out.add(String.valueOf(Math.round(p.getLocation().getYaw() + 180)));
             } else if (args.length == 8) {
                 out.add("p2");
+                out.add("mini");
             }
         } else if (args.length == 3 && args[1].equalsIgnoreCase("hp")) {
             out.addAll(List.of("100", "51", "50", "25", "1"));

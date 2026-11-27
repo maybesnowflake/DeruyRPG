@@ -51,7 +51,12 @@ public final class BossManager implements Listener {
     }
 
     public MossWarden spawn(Location loc, boolean phase2) {
-        MossWarden w = MossWarden.spawn(plugin, settings, loc, phase2);
+        return spawn(loc, phase2, false);
+    }
+
+    /** mini = 1페이즈 전용 미니보스(능력치 × mini-stat-multiplier, 각성 없음). */
+    public MossWarden spawn(Location loc, boolean phase2, boolean mini) {
+        MossWarden w = MossWarden.spawn(plugin, mini ? settings.mini() : settings, loc, phase2 && !mini);
         wardens.add(w);
         return w;
     }

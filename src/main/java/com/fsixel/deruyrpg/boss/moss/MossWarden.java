@@ -199,6 +199,7 @@ public final class MossWarden {
     }
 
     private Component name() {
+        if (cfg.mini) return Component.text("이끼 수문장", NamedTextColor.GREEN); // 일부러 같은 이름 (최종 보스인 척)
         return phase == 1
                 ? Component.text("이끼 수문장", NamedTextColor.GREEN)
                 : Component.text("격분한 이끼 수문장", NamedTextColor.DARK_PURPLE).decorate(TextDecoration.BOLD);
@@ -224,7 +225,7 @@ public final class MossWarden {
     }
 
     public void forcePhase2() {
-        if (phase == 1 && state != State.TRANSITION && state != State.DYING && state != State.DEAD) {
+        if (!cfg.mini && phase == 1 && state != State.TRANSITION && state != State.DYING && state != State.DEAD) {
             hitbox.setHealth(Math.max(1, maxHp * 0.5));
             startTransition();
         }
@@ -258,7 +259,10 @@ public final class MossWarden {
         if (state == State.STAGGER) e.setDamage(e.getDamage() * STAGGER_TAKEN);
         double hp = hitbox.getHealth();
         double fin = e.getFinalDamage();
-        if (phase == 1 && hp - fin <= maxHp * 0.5) {
+        if (cfg.mini && hp - fin < 1) { // 미니보스: 각성 없이 처치
+            e.setDamage(Math.max(0, hp - 1));
+            pendingDeath = true;
+        } else if (!cfg.mini && phase == 1 && hp - fin <= maxHp * 0.5) {
             e.setDamage(Math.max(0, hp - maxHp * 0.5));
             pendingTransition = true;
         } else if (phase == 2 && hp - fin < 1) {
