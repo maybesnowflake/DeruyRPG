@@ -10,7 +10,7 @@ import java.util.*;
 
 /** 파티 한 팀의 던전 진행 상태. 규칙은 docs/JUNGLE_MAP.md "목숨 규칙". */
 final class Run {
-    enum Phase { ROUND, VOTE, MOVING, RETRY, ENDED }
+    enum Phase { GENERATING, ROUND, VOTE, MOVING, RETRY, ENDED }
 
     final int id;
     final List<UUID> members = new ArrayList<>();
@@ -37,6 +37,17 @@ final class Run {
     long voteEndsAt;
     /** 이미 클리어해 보상을 받은 라운드 (재도전 시 재지급 X) */
     final Set<String> rewarded = new HashSet<>();
+
+    /** 이번 판에 배치된 방으로 좌표가 채워진 라운드 (템플릿 조립) */
+    final Map<String, RoundDef> resolved = new LinkedHashMap<>();
+    final List<com.fsixel.deruyrpg.dungeon.gen.RoomPlacer.Placed> placed = new ArrayList<>();
+    final Set<String> usedRooms = new HashSet<>();
+    int slot = -1;
+
+    RoundDef def(String id) {
+        RoundDef r = resolved.get(id);
+        return r != null ? r : chapter.round(id);
+    }
 
     Run(int id) {
         this.id = id;

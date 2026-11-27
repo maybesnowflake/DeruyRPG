@@ -56,7 +56,11 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     private final File file;
     private YamlConfiguration yml;
 
-    private int maxLives = 3, buyMaxLives = 4, bossRespawnSeconds = 10;
+    private int maxLives = 3, buyMaxLives = 4, bossRespawnSeconds = 10, cell = 64;
+    private com.fsixel.deruyrpg.dungeon.gen.RoomLibrary rooms;
+    private final com.fsixel.deruyrpg.dungeon.gen.RoomPlacer placer;
+    private final com.fsixel.deruyrpg.dungeon.gen.DungeonWorld dworld;
+    private final Set<Integer> slots = new HashSet<>();
     private @Nullable Location returnLoc;
     private final Map<String, ChapterDef> chapters = new LinkedHashMap<>();
 
@@ -70,6 +74,9 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         this.mobKey = new NamespacedKey(plugin, "dungeon_run");
         this.file = new File(plugin.getDataFolder(), "dungeon.yml");
         if (!file.exists()) plugin.saveResource("dungeon.yml", false);
+        this.rooms = new com.fsixel.deruyrpg.dungeon.gen.RoomLibrary(new File(plugin.getDataFolder(), "rooms"), plugin.getLogger());
+        this.placer = new com.fsixel.deruyrpg.dungeon.gen.RoomPlacer(plugin);
+        this.dworld = new com.fsixel.deruyrpg.dungeon.gen.DungeonWorld(plugin);
         load();
         task = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, TICK, TICK);
     }
@@ -79,6 +86,8 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     public void load() {
         yml = YamlConfiguration.loadConfiguration(file);
         maxLives = Math.max(1, yml.getInt("max-lives", 3));
+        cell = Math.max(16, yml.getInt("room-cell", 64));
+        if (rooms != null) rooms.load(cell);
         buyMaxLives = Math.max(maxLives, yml.getInt("buy-max-lives", 4));
         bossRespawnSeconds = Math.max(1, yml.getInt("boss-respawn-seconds", 10));
         returnLoc = yml.getLocation("return");
@@ -120,7 +129,8 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
                 for (Object o : r.getList("points", List.of())) if (o instanceof Location l) points.add(l);
                 rounds.put(rid, new RoundDef(rid, r.getInt("stage", 1), type, r.getString("name", rid),
                         r.getStringList("next"), waves, r.getLocation("spawn"), points,
-                        r.getLocation("trigger"), r.getLocation("boss-spawn")));
+                        r.getLocation("trigger"), r.getLocation("boss-spawn"),
+                        r.getString("pool", type.name().toLowerCase(Locale.ROOT)), r.getStringList("tags")));
             }
             String next = c.getString("next-chapter", "");
             chapters.put(cid, new ChapterDef(cid, c.getString("name", cid), c.getString("start", ""),
@@ -142,7 +152,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         List<String> out = new ArrayList<>();
         if (c.round(c.start()) == null) out.add("start(" + c.start() + ") 없음");
         for (RoundDef r : c.rounds().values()) {
-            if (r.spawn() == null) out.add(r.id() + ".spawn");
+            if (r.spawn() == null && !rooms.has(r.pool())) out.add(r.id() + ": 방 템플릿 없음(rooms/" + r.pool() + "/)");
             for (String n : r.next()) if (c.round(n) == null) out.add(r.id() + ".next→" + n + " 없음");
         }
         return out;
@@ -169,7 +179,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         run.chapter = c;
         run.stage = c.round(c.start()).stage();
         broadcast(run, Component.text("[던전] " + c.name() + " 챕터 시작 — 목숨 " + maxLives + "개", NamedTextColor.GOLD));
-        enterRound(run, c.start());
+        build(run, () -> enterRound(run, c.start()));
         return null;
     }
 
@@ -191,17 +201,128 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
                     Component.text("기본 월드로 돌아갑니다", NamedTextColor.GRAY)));
         }
         runs.remove(run.id);
+        freeZone(run);
     }
 
     public void stopAll() {
         for (Run r : new ArrayList<>(runs.values())) end(r, false);
         task.cancel();
+        placer.shutdown();
+    }
+
+    // ================================================================== 방 조립 (템플릿)
+
+    /**
+     * 챕터의 고정 그래프를 그대로 두고, 위치가 없는 라운드마다 풀에서 방을 골라 파티 전용 구역에 배치.
+     * 셀 배치: 시작 라운드부터 깊이(열) × 같은 깊이 순서(행). 방끼리는 텔레포트로 이동 (MVP: 복도·회전 없음).
+     */
+    private void build(Run run, Runnable then) {
+        ChapterDef c = run.chapter;
+        boolean any = false;
+        for (RoundDef r : c.rounds().values()) if (r.generated()) any = true;
+        if (!any) {
+            then.run();
+            return;
+        }
+        run.phase = Run.Phase.GENERATING;
+        freeZone(run);
+        run.resolved.clear();
+        run.usedRooms.clear();
+        int slot = 0;
+        while (slots.contains(slot)) slot++;
+        slots.add(slot);
+        run.slot = slot;
+        World w = dworld.world();
+        // BFS 깊이
+        Map<String, Integer> depth = new LinkedHashMap<>();
+        Deque<String> q = new ArrayDeque<>();
+        depth.put(c.start(), 0);
+        q.add(c.start());
+        while (!q.isEmpty()) {
+            String id = q.poll();
+            RoundDef r = c.round(id);
+            if (r == null) continue;
+            for (String n : r.next()) if (!depth.containsKey(n)) {
+                depth.put(n, depth.get(id) + 1);
+                q.add(n);
+            }
+        }
+        Map<Integer, Integer> rowAt = new HashMap<>();
+        List<String> todo = new ArrayList<>();
+        for (var e : depth.entrySet()) if (c.round(e.getKey()) != null && c.round(e.getKey()).generated()) todo.add(e.getKey());
+        int[] left = {todo.size()};
+        String seedInfo = "";
+        broadcast(run, Component.text("던전 생성 중... (방 " + todo.size() + "개)", NamedTextColor.GRAY));
+        for (String id : todo) {
+            RoundDef r = c.round(id);
+            int col = depth.get(id), row = rowAt.merge(col, 1, Integer::sum) - 1;
+            var room = rooms.pick(r.pool(), r.tags(), run.usedRooms);
+            if (room == null) { // load 이후 파일이 사라진 경우
+                end(run, false);
+                return;
+            }
+            run.usedRooms.add(room.pool() + "/" + room.name());
+            Location origin = new Location(w, slot * 4096L + col * (long) cell, 64, row * (long) cell);
+            var placed = placer.place(room, origin, () -> {
+                if (--left[0] == 0) finishBuild(run, then);
+            });
+            run.placed.add(placed);
+            run.resolved.put(id, null); // 자리 표시 — finishBuild 에서 채움
+            seedInfo += id + "=" + placed.room + " ";
+        }
+        plugin.getLogger().info("[던전 " + run.id + "] 방 배치: " + seedInfo.trim());
+        if (todo.isEmpty()) finishBuild(run, then);
+    }
+
+    private void finishBuild(Run run, Runnable then) {
+        if (run.phase != Run.Phase.GENERATING) return;
+        int i = 0;
+        List<String> bad = new ArrayList<>();
+        for (String id : new ArrayList<>(run.resolved.keySet())) {
+            var pl = run.placed.get(i++);
+            RoundDef r = run.chapter.round(id);
+            if (pl.spawn == null) {
+                bad.add(id + "(" + pl.room + ": [spawn] 표지판 없음)");
+                continue;
+            }
+            run.resolved.put(id, r.at(pl.spawn, pl.mobs, pl.trigger, pl.boss));
+        }
+        if (!bad.isEmpty()) {
+            broadcast(run, Component.text("던전 생성 실패: " + String.join(", ", bad), NamedTextColor.RED));
+            end(run, false);
+            return;
+        }
+        run.phase = Run.Phase.MOVING;
+        then.run();
+    }
+
+    private void freeZone(Run run) {
+        if (run.slot < 0) return;
+        int slot = run.slot;
+        run.slot = -1;
+        List<com.fsixel.deruyrpg.dungeon.gen.RoomPlacer.Placed> boxes = new ArrayList<>(run.placed);
+        run.placed.clear();
+        if (boxes.isEmpty()) {
+            slots.remove(slot);
+            return;
+        }
+        // 구역 안 남은 엔티티 제거 후 블록 비우기 → 다 비면 구역 반납
+        World w = dworld.world();
+        for (Entity en : w.getEntities()) {
+            if (en instanceof Player) continue;
+            double x = en.getLocation().getX();
+            if (x >= slot * 4096.0 && x < slot * 4096.0 + 4096) en.remove();
+        }
+        int[] left = {boxes.size()};
+        for (var b : boxes) placer.clear(b.origin, b.size, () -> {
+            if (--left[0] == 0) slots.remove(slot);
+        });
     }
 
     // ================================================================== 라운드
 
     private void enterRound(Run run, String roundId) {
-        RoundDef r = run.chapter.round(roundId);
+        RoundDef r = run.def(roundId);
         if (r == null) {
             end(run, false);
             return;
@@ -334,10 +455,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
                 run.chapter = nc;
                 run.stage = nc.round(nc.start()).stage();
                 broadcast(run, Component.text("[던전] " + nc.name() + " 챕터 시작", NamedTextColor.GOLD));
-                run.phase = Run.Phase.MOVING;
-                Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                    if (run.phase == Run.Phase.MOVING) enterRound(run, nc.start());
-                }, 60);
+                build(run, () -> enterRound(run, nc.start()));
             } else {
                 end(run, true);
             }
@@ -425,7 +543,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         if (!(e.getEntity() instanceof Player p)) return;
         Run run = byPlayer.get(p.getUniqueId());
         if (run == null) return;
-        if (run.down.contains(p.getUniqueId()) || run.phase == Run.Phase.MOVING || run.phase == Run.Phase.RETRY) {
+        if (run.down.contains(p.getUniqueId()) || run.phase == Run.Phase.MOVING || run.phase == Run.Phase.RETRY || run.phase == Run.Phase.GENERATING) {
             e.setCancelled(true);
             return;
         }
@@ -638,7 +756,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     @Override
     public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, @NotNull String[] args) {
         if (args.length == 0) {
-            sender.sendMessage(Component.text("/dg status · vote <라운드> · next · leave  |  관리: start <챕터> [플레이어...] · stop · set <챕터> <라운드> <spawn|point|trigger|boss-spawn|clearpoints> · setreturn · reload · lives <플레이어> <n>", NamedTextColor.YELLOW));
+            sender.sendMessage(Component.text("/dg status · vote <라운드> · next · leave  |  관리: start <챕터> [플레이어...] · stop · set <챕터> <라운드> <spawn|point|trigger|boss-spawn|clearpoints> · setreturn · reload · rooms · lives <플레이어> <n>", NamedTextColor.YELLOW));
             return true;
         }
         boolean admin = sender.hasPermission("deruyrpg.admin");
@@ -738,6 +856,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
                 if (target != null) end(target, false);
                 else if (args.length >= 2 && args[1].equalsIgnoreCase("all")) for (Run r : new ArrayList<>(runs.values())) end(r, false);
             }
+            case "rooms" -> sender.sendMessage(Component.text("방 템플릿: " + rooms.counts() + " (셀 " + cell + "칸, plugins/DeruyRPG/rooms/<풀>/*.nbt)", NamedTextColor.GREEN));
             case "reload" -> {
                 load();
                 sender.sendMessage(Component.text("dungeon.yml 다시 읽음 — 챕터 " + chapters.size() + "개", NamedTextColor.GREEN));
@@ -806,7 +925,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         boolean admin = sender.hasPermission("deruyrpg.admin");
         if (args.length == 1) {
             out.addAll(List.of("status", "vote", "next", "leave"));
-            if (admin) out.addAll(List.of("start", "stop", "set", "setreturn", "reload", "lives"));
+            if (admin) out.addAll(List.of("start", "stop", "set", "setreturn", "reload", "lives", "rooms"));
         } else if (args.length == 2 && (args[0].equalsIgnoreCase("start") || args[0].equalsIgnoreCase("set"))) {
             out.addAll(chapters.keySet());
         } else if (args.length == 2 && args[0].equalsIgnoreCase("vote") && sender instanceof Player p) {

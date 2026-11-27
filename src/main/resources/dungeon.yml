@@ -1,5 +1,8 @@
 # DeruyRPG 던전 설정 — 챕터 → 스테이지(라운드의 stage 번호) → 라운드
-# 위치는 게임 안에서 /dg set <챕터> <라운드> <spawn|point|trigger|boss-spawn> 으로 저장 (이 파일에 자동 기록)
+# 라운드 위치 두 가지 방식:
+#  1) 방 조립(기본): spawn 이 없으면 매 판 rooms/<pool>/*.nbt 에서 방을 무작위로 골라 전용 월드에 배치 (docs/DUNGEON_GEN.md)
+#     pool 기본값 = type (combat, elite, puzzle, shop, rest, event, miniboss, boss), tags 가 겹치는 방 우선
+#  2) 고정 맵: /dg set <챕터> <라운드> <spawn|point|trigger|boss-spawn> 으로 저장하면 그 라운드는 고정 위치 사용
 # 귀환 지점(기본 월드): /dg setreturn
 #
 # 라운드 type: combat(전투) elite(엘리트) puzzle(퍼즐) shop(상점) rest(휴식) event(이벤트) miniboss(미니보스) boss(보스)
@@ -11,6 +14,7 @@
 max-lives: 3            # 기본 최대 목숨
 buy-max-lives: 4        # 상점 구매로 늘릴 수 있는 최대치
 boss-respawn-seconds: 10
+room-cell: 64           # 방 한 칸 크기 (템플릿 가로·세로가 이보다 크면 건너뜀)
 
 chapters:
   jungle:
@@ -21,27 +25,27 @@ chapters:
       1: 1
     rounds:
       # ---------------- 스테이지 1: 정글 외곽 (무기별 길 4개 → 미니보스)
-      camp:  { stage: 1, type: rest,   name: "탐험대 캠프", next: [a1, b1, c1, d1] }
+      camp:  { stage: 1, type: rest, pool: camp,   name: "탐험대 캠프", next: [a1, b1, c1, d1] }
       # A 덩굴 수관길 (철퇴·활·쇠뇌)
-      a1:    { stage: 1, type: combat, name: "덩굴 수관길", waves: [["zombie:3", "spider:2"], ["bogged:2"]], next: [a2] }
-      a2:    { stage: 1, type: puzzle, name: "덩굴 매듭", next: [a3] }
-      a3:    { stage: 1, type: combat, name: "거목 위 전투", waves: [["zombie:3", "bogged:2"]], next: [a4] }
-      a4:    { stage: 1, type: shop,   name: "떠돌이 상인", next: [mini] }
+      a1:    { stage: 1, tags: [vertical], type: combat, name: "덩굴 수관길", waves: [["zombie:3", "spider:2"], ["bogged:2"]], next: [a2] }
+      a2:    { stage: 1, tags: [vertical], type: puzzle, name: "덩굴 매듭", next: [a3] }
+      a3:    { stage: 1, tags: [vertical], type: combat, name: "거목 위 전투", waves: [["zombie:3", "bogged:2"]], next: [a4] }
+      a4:    { stage: 1, tags: [vertical], type: shop,   name: "떠돌이 상인", next: [mini] }
       # B 범람 수로길 (삼지창·낚싯대)
-      b1:    { stage: 1, type: combat, name: "범람 수로길", waves: [["drowned:3", "slime:2"]], next: [b2] }
-      b2:    { stage: 1, type: combat, name: "늪지 습격", waves: [["drowned:3"], ["witch:1", "slime:2"]], next: [b3] }
-      b3:    { stage: 1, type: puzzle, name: "수위 맞추기", next: [b4] }
-      b4:    { stage: 1, type: shop,   name: "늪지 상인", next: [mini] }
+      b1:    { stage: 1, tags: [water], type: combat, name: "범람 수로길", waves: [["drowned:3", "slime:2"]], next: [b2] }
+      b2:    { stage: 1, tags: [water], type: combat, name: "늪지 습격", waves: [["drowned:3"], ["witch:1", "slime:2"]], next: [b3] }
+      b3:    { stage: 1, tags: [water], type: puzzle, name: "수위 맞추기", next: [b4] }
+      b4:    { stage: 1, tags: [water], type: shop,   name: "늪지 상인", next: [mini] }
       # C 무너진 회랑 (창·방패·검)
-      c1:    { stage: 1, type: puzzle, name: "함정 복도", next: [c2] }
-      c2:    { stage: 1, type: combat, name: "무너진 회랑", waves: [["skeleton:3", "zombie:2"]], next: [c3] }
-      c3:    { stage: 1, type: elite,  name: "회랑 파수꾼", waves: [["vindicator:1", "pillager:2"]], next: [c4] }
-      c4:    { stage: 1, type: shop,   name: "회랑 상인", next: [mini] }
+      c1:    { stage: 1, tags: [narrow], type: puzzle, name: "함정 복도", next: [c2] }
+      c2:    { stage: 1, tags: [narrow], type: combat, name: "무너진 회랑", waves: [["skeleton:3", "zombie:2"]], next: [c3] }
+      c3:    { stage: 1, tags: [narrow], type: elite,  name: "회랑 파수꾼", waves: [["vindicator:1", "pillager:2"]], next: [c4] }
+      c4:    { stage: 1, tags: [narrow], type: shop,   name: "회랑 상인", next: [mini] }
       # D 사냥꾼 공터 (도끼·검)
-      d1:    { stage: 1, type: combat, name: "사냥꾼 공터", waves: [["zombie:5"], ["spider:3"]], next: [d2] }
-      d2:    { stage: 1, type: elite,  name: "공터의 우두머리", waves: [["vindicator:2", "zombie:3"]], next: [d3] }
-      d3:    { stage: 1, type: combat, name: "몰이 사냥", waves: [["zombie:4", "spider:2"]], next: [d4] }
-      d4:    { stage: 1, type: shop,   name: "사냥꾼 상인", next: [mini] }
+      d1:    { stage: 1, tags: [open], type: combat, name: "사냥꾼 공터", waves: [["zombie:5"], ["spider:3"]], next: [d2] }
+      d2:    { stage: 1, tags: [open], type: elite,  name: "공터의 우두머리", waves: [["vindicator:2", "zombie:3"]], next: [d3] }
+      d3:    { stage: 1, tags: [open], type: combat, name: "몰이 사냥", waves: [["zombie:4", "spider:2"]], next: [d4] }
+      d4:    { stage: 1, tags: [open], type: shop,   name: "사냥꾼 상인", next: [mini] }
       mini:  { stage: 1, type: miniboss, name: "이끼 수문장", next: [s2in] }
       # ---------------- 스테이지 2: 잠긴 사원 → 수문
       s2in:  { stage: 2, type: combat, name: "사원 입구", waves: [["zombie:3", "pillager:2"]], next: [s2puz, s2eli] }
