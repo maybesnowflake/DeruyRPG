@@ -31,6 +31,8 @@ public final class RoomPlacer {
         public Location spawn;
         public Location boss;
         public Location trigger;
+        /** 출구 [exit] (남쪽 가장자리 통로) — 협곡 길 출발점 */
+        public Location exit;
         public final List<Location> mobs = new ArrayList<>();
 
         Placed(String room, Location origin, BlockVector size) {
@@ -94,6 +96,7 @@ public final class RoomPlacer {
                             case "[boss]" -> out.boss = c;
                             case "[mob]" -> out.mobs.add(c);
                             case "[trigger]" -> out.trigger = at.clone();
+                            case "[exit]" -> out.exit = c;
                             default -> marker = false;
                         }
                         if (marker) {
@@ -116,6 +119,28 @@ public final class RoomPlacer {
             }
         });
         return out;
+    }
+
+    /** 임의 작업을 틱 예산으로 나눠 실행. steps.next() = 이번 걸음이 쓴 블록 수. */
+    public void work(Iterator<Integer> steps, Runnable done) {
+        jobs.add(new Job() {
+            boolean finished;
+
+            @Override
+            public int run(int budget) {
+                while (budget > 0 && steps.hasNext()) budget -= Math.max(1, steps.next());
+                if (!steps.hasNext() && !finished) {
+                    finished = true;
+                    done.run();
+                }
+                return Math.max(0, budget);
+            }
+
+            @Override
+            public boolean done() {
+                return finished;
+            }
+        });
     }
 
     /** 영역을 공기로 비움 (판 종료 시). */

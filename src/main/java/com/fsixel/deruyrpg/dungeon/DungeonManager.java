@@ -50,6 +50,8 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     private static final int TICK = 10; // 0.5초마다 진행 검사
     private static final int VOTE_SECONDS = 20;
     private static final double SCALE_PER_PLAYER = 0.15;
+    private static final int CANYON_GAP = 40;   // 방 칸 사이 협곡 길이
+    private static final int WALK_SECONDS = 90; // 걸어서 안 오면 이 시간 뒤 텔레포트
 
     private final DeruyRPG plugin;
     private final NamespacedKey mobKey;
@@ -222,6 +224,9 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         freeZone(run);
         run.resolved.clear();
         run.usedRooms.clear();
+        run.rooms.clear();
+        run.walk.clear();
+        run.gates.clear();
         boolean any = false;
         for (RoundDef r : c.rounds().values()) if (r.generated()) any = true;
         if (!any) {
@@ -263,11 +268,15 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
                 return;
             }
             run.usedRooms.add(room.pool() + "/" + room.name());
-            Location origin = new Location(w, slot * 4096L + col * (long) cell, 64, row * (long) cell);
+            // 깊이 = 남쪽(+z), 갈림길 = 동쪽(+x). 칸 가운데 정렬, 칸 사이 CANYON_GAP 은 협곡
+            int pitch = cell + CANYON_GAP;
+            Location origin = new Location(w, slot * 4096L + row * (long) pitch + (cell - room.size().getBlockX()) / 2,
+                    64, col * (long) pitch + (cell - room.size().getBlockZ()) / 2);
             var placed = placer.place(room, origin, () -> {
                 if (--left[0] == 0) finishBuild(run, then);
             });
             run.placed.add(placed);
+            run.rooms.put(id, placed);
             run.resolved.put(id, null); // 자리 표시 — finishBuild 에서 채움
             seedInfo += id + "=" + placed.room + " ";
         }
@@ -293,8 +302,51 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
             end(run, false);
             return;
         }
-        run.phase = Run.Phase.MOVING;
-        then.run();
+        canyon(run, then);
+    }
+
+    /** 방 사이 협곡 길 생성 (A 출구 → 남쪽 중간 → B 입구). 깊이가 거꾸로인 연결은 텔레포트로 남김. */
+    private void canyon(Run run, Runnable then) {
+        List<com.fsixel.deruyrpg.dungeon.gen.CanyonGen.Rect> rects = new ArrayList<>();
+        List<com.fsixel.deruyrpg.dungeon.gen.CanyonGen.Path> paths = new ArrayList<>();
+        for (var e : run.rooms.entrySet()) {
+            var a = e.getValue();
+            rects.add(new com.fsixel.deruyrpg.dungeon.gen.CanyonGen.Rect(a.origin.getBlockX(), a.origin.getBlockZ(),
+                    a.origin.getBlockX() + a.size.getBlockX() - 1, a.origin.getBlockZ() + a.size.getBlockZ() - 1));
+            RoundDef r = run.chapter.round(e.getKey());
+            if (a.exit == null || r == null) continue;
+            int ax = a.exit.getBlockX(), az = a.origin.getBlockZ() + a.size.getBlockZ();
+            for (String n : r.next()) {
+                var b = run.rooms.get(n);
+                if (b == null || b.spawn == null) continue;
+                int bx = b.spawn.getBlockX(), bz = b.origin.getBlockZ() - 1;
+                if (bz - az < 8) continue; // 같은 깊이·역방향
+                int mid = (az + bz) / 2;
+                paths.add(new com.fsixel.deruyrpg.dungeon.gen.CanyonGen.Path(n,
+                        new int[][]{{ax, az}, {ax, mid}, {bx, mid}, {bx, bz}},
+                        a.exit.getBlockY() - 1, b.spawn.getBlockY() - 1));
+                run.walk.add(e.getKey() + ">" + n);
+            }
+        }
+        if (rects.isEmpty()) {
+            run.phase = Run.Phase.MOVING;
+            then.run();
+            return;
+        }
+        var gen = new com.fsixel.deruyrpg.dungeon.gen.CanyonGen(dworld.world(), rects, paths, 64, run.id * 31L + run.slot);
+        run.placed.add(gen.box());
+        placer.work(gen, () -> {
+            run.gates.putAll(gen.gates);
+            if (run.phase != Run.Phase.GENERATING) return;
+            run.phase = Run.Phase.MOVING;
+            then.run();
+        });
+    }
+
+    private static boolean inside(@Nullable com.fsixel.deruyrpg.dungeon.gen.RoomPlacer.Placed box, Location l) {
+        if (box == null || l.getWorld() != box.origin.getWorld()) return false;
+        double dx = l.getX() - box.origin.getBlockX(), dz = l.getZ() - box.origin.getBlockZ();
+        return dx >= 0 && dz >= 0 && dx < box.size.getBlockX() && dz < box.size.getBlockZ() && l.getY() >= box.origin.getY() - 2;
     }
 
     private void freeZone(Run run) {
@@ -352,10 +404,13 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
             if (run.lives(u) > 0) revive(run, u, false);
         }
         run.scaleCount = Math.max(1, run.aliveMembers().size());
+        boolean walked = run.walkedIn;
+        run.walkedIn = false;
         for (UUID u : run.members) {
             Player p = Bukkit.getPlayer(u);
             if (p == null) continue;
-            p.teleport(r.spawn());
+            // 협곡으로 걸어 들어왔으면 이미 방 안에 있는 사람은 그대로 (늦은 사람·관전자만 스폰으로)
+            if (!walked || !inside(run.rooms.get(roundId), p.getLocation())) p.teleport(r.spawn());
             p.showTitle(Title.title(Component.text(r.name(), NamedTextColor.GREEN),
                     Component.text("스테이지 " + r.stage() + " · " + r.type().label, NamedTextColor.GRAY)));
         }
@@ -481,6 +536,20 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     }
 
     private void moveTo(Run run, String roundId, int delay) {
+        if (run.walk.contains(run.round.id() + ">" + roundId)) {
+            run.phase = Run.Phase.MOVING;
+            run.moveTarget = roundId;
+            run.moveDeadline = System.currentTimeMillis() + WALK_SECONDS * 1000L;
+            List<Block> gate = run.gates.getOrDefault(roundId, List.of());
+            for (Block b : gate) b.setType(Material.AIR, false);
+            if (!gate.isEmpty()) {
+                Location at = gate.getFirst().getLocation();
+                at.getWorld().playSound(at, Sound.BLOCK_PISTON_CONTRACT, 2f, 0.6f);
+                at.getWorld().spawnParticle(Particle.BLOCK, at, 60, 2, 2, 2, Material.MOSS_BLOCK.createBlockData());
+            }
+            hint(run, "길이 열렸습니다 — 협곡을 따라 다음 방으로 (" + WALK_SECONDS + "초 뒤 자동 이동)");
+            return;
+        }
         run.phase = Run.Phase.MOVING;
         Bukkit.getScheduler().runTaskLater(plugin, () -> {
             if (run.phase == Run.Phase.MOVING && runs.containsKey(run.id)) enterRound(run, roundId);
@@ -513,6 +582,20 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
                 int voters = 0;
                 for (UUID u : run.members) if (run.lives(u) > 0 || !run.down.contains(u)) voters++;
                 if (now >= run.voteEndsAt || run.votes.size() >= voters) resolveVote(run);
+                continue;
+            }
+            if (run.phase == Run.Phase.MOVING && run.moveTarget != null) {
+                boolean in = false;
+                for (UUID u : run.aliveMembers()) {
+                    Player p = Bukkit.getPlayer(u);
+                    if (p != null && inside(run.rooms.get(run.moveTarget), p.getLocation())) in = true;
+                }
+                if (in || now >= run.moveDeadline) {
+                    String t = run.moveTarget;
+                    run.moveTarget = null;
+                    run.walkedIn = in;
+                    enterRound(run, t);
+                }
                 continue;
             }
             if (run.phase != Run.Phase.ROUND) continue;

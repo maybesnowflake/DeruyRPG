@@ -42,6 +42,15 @@ final class Run {
     final Map<String, RoundDef> resolved = new LinkedHashMap<>();
     final List<com.fsixel.deruyrpg.dungeon.gen.RoomPlacer.Placed> placed = new ArrayList<>();
     final Set<String> usedRooms = new HashSet<>();
+    /** 라운드 id → 배치된 방 (걸어 들어왔는지 판정) */
+    final Map<String, com.fsixel.deruyrpg.dungeon.gen.RoomPlacer.Placed> rooms = new HashMap<>();
+    /** 협곡 길로 이어진 라운드 쌍 "A>B" 와 B 입구 문 */
+    final Set<String> walk = new HashSet<>();
+    final Map<String, List<org.bukkit.block.Block>> gates = new HashMap<>();
+    /** 걸어서 가는 중인 다음 라운드 (MOVING) */
+    @Nullable String moveTarget;
+    long moveDeadline;
+    boolean walkedIn;
     int slot = -1;
 
     RoundDef def(String id) {

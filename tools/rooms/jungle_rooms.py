@@ -276,6 +276,7 @@ def root_tunnel_narrow_02(rng):
     for (x, z) in ((5, 10), (6, 14), (12, 18), (20, 19), (29, 26), (30, 30), (24, 34), (14, 35), (6, 40)):
         r.column(x, z, 1, 5, "mangrove_roots")
     r.marker(5, 1, 2, "spawn")
+    r.exit = (5, 1)
     mobs(r, [(16, 1, 18), (29, 1, 21), (29, 1, 33), (18, 1, 33), (5, 1, 45)])
     return r
 
@@ -298,7 +299,8 @@ def collapsed_gallery_narrow_03(rng):
     for z in range(3, 54, 7):
         r.set(3, 7, z, "lantern[hanging=true]"); r.set(11, 7, z, "lantern[hanging=true]")
     r.marker(3, 1, 2, "spawn")
-    mobs(r, [(11, 1, 10), (11, 1, 26), (3, 1, 38), (11, 1, 50), (3, 1, 52)])
+    r.exit = (11, 1)
+    mobs(r, [(11, 1, 10), (11, 1, 26), (3, 1, 38), (11, 1, 50), (3, 1, 50)])
     return r
 
 
@@ -414,6 +416,7 @@ def vine_knot_01(rng):
     edge_trees(r, 4, rng)
     r.plants(1, 0, 0, 43, 39, rng, 0.05)
     r.marker(20, 1, 36, "spawn")
+    r.mirror_z()                                            # 입구는 북쪽 규칙 → 스폰이 북쪽으로
     return r
 
 
@@ -443,6 +446,7 @@ def water_gauge_01(rng):
     for (x, z) in ((2, 30), (36, 30), (36, 4)):
         r.jungle_tree(x, 3, z, 8, rng)
     r.marker(20, 3, 32, "spawn")
+    r.mirror_z()                                            # 입구는 북쪽 규칙 → 스폰 북쪽, 수로 건너 남쪽 레버
     return r
 
 
@@ -476,7 +480,8 @@ def trap_corridor_01(rng):
     r.fill(5, 0, 42, 9, 0, 48, "mossy_stone_bricks")
     for z in range(2, 48, 6):
         r.set(5, 5, z, "lantern[hanging=true]"); r.set(9, 5, z, "lantern[hanging=true]")
-    lever_on_trigger(r, 7, 1, 48, "north")
+    r.marker(10, 1, 45, "trigger")                          # 동쪽 벽 램프 + 레버 (출구 통로는 가운데)
+    r.set(9, 1, 45, "lever[face=wall,facing=west,powered=false]")
     sign(r, 6, 2, 1, ["이끼만 밟아라", "", "", ""], block="oak_wall_sign[facing=south]")
     r.set(6, 2, 0, "stone_bricks")
     r.marker(7, 1, 2, "spawn")
@@ -505,6 +510,7 @@ def moss_glyph_lever_01(rng):
         if x not in xs:
             r.set(x, 3, 28, "cracked_stone_bricks")
     sign(r, 14, 3, 7, ["벽화의 이끼를", "따라 당겨라", "", ""])
+    r.exit = (24, 1)                                        # 벽화(8~20)를 피해 동쪽으로
     for (x, z) in ((3, 12), (25, 12), (3, 22), (25, 22)):
         r.fill(x, 1, z, x + 1, 7, z + 1, "chiseled_stone_bricks")
     r.fill(0, 8, 0, 29, 8, 29, "mossy_stone_bricks")

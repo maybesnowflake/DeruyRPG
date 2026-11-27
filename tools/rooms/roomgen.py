@@ -70,6 +70,8 @@ class Room:
         self.block_nbt: dict[tuple[int, int, int], Compound] = {}
         self.markers: dict[str, int] = {}
         self.marker_pos: list[tuple[str, tuple[int, int, int]]] = []
+        # 출구 (x, 바닥 위 y). None 이면 (가로 가운데, 스폰 높이). 협곡 길이 여기(남쪽 z 끝)에서 다음 방 북쪽 입구로 이어짐
+        self.exit: tuple[int, int] | None = None
 
     # ---------------------------------------------------------------- 기본
     def inside(self, x: int, y: int, z: int) -> bool:
@@ -176,8 +178,8 @@ class Room:
     def marker(self, x: int, y: int, z: int, kind: str) -> None:
         """마커 표지판. kind: spawn | mob | boss | trigger. 바닥 바로 위 칸에 둘 것."""
         kind = kind.strip("[]").lower()
-        if kind not in ("spawn", "mob", "boss", "trigger"):
-            raise ValueError("마커는 spawn|mob|boss|trigger")
+        if kind not in ("spawn", "mob", "boss", "trigger", "exit"):
+            raise ValueError("마커는 spawn|mob|boss|trigger|exit")
         if kind == "spawn" and self.markers.get("spawn"):
             raise ValueError("[spawn] 은 방마다 1개")
         if kind != "trigger":  # 마커 주변 장식 덤불은 치움 (서 있을 자리 확보)
@@ -199,6 +201,51 @@ class Room:
         self.markers[kind] = self.markers.get(kind, 0) + 1
         self.marker_pos.append((kind, (x, y, z)))
 
+    # ---------------------------------------------------------------- 문 (협곡 연결)
+    def _lane(self, x: int, fy: int, zs) -> None:
+        """폭 3 · 높이 4 통로를 뚫고 바닥을 깖. 마커 칸은 건드리지 않음."""
+        keep = {p for _, p in self.marker_pos}
+        for z in zs:
+            for lx in (x - 1, x, x + 1):
+                if _soft(self.get(lx, fy, z)):
+                    self.set(lx, fy, z, "mossy_cobblestone")
+                for y in range(fy + 1, fy + 5):
+                    if (lx, y, z) not in keep:
+                        self.blocks.pop((lx, y, z), None)
+                        self.block_nbt.pop((lx, y, z), None)
+
+    def doors(self, pool: str) -> None:
+        """입구 = 북쪽(z=0) 가장자리, 스폰 x · 스폰 높이 / 출구 = 남쪽 가장자리 [exit] 마커.
+        플러그인(CanyonGen)이 방 사이 협곡 길을 이 두 점으로 이음. 캠프는 입구 없음, 보스방은 출구 없음."""
+        sx, _, sz = self.size
+        spawn = next(p for k, p in self.marker_pos if k == "spawn")
+        if pool != "camp":
+            self._lane(spawn[0], spawn[1] - 1, range(0, 3))
+        if pool != "boss":
+            ex, ey = self.exit or (sx // 2, spawn[1])
+            self._lane(ex, ey - 1, range(sz - 3, sz))
+            self.marker(ex, ey, sz - 2, "exit")
+
+    def mirror_z(self) -> None:
+        """남북 뒤집기 (스폰이 남쪽에 있는 방을 북쪽 입구 규칙에 맞출 때). 방향 속성도 같이 뒤집음."""
+        sz = self.size[2]
+        sw = {"north": "south", "south": "north"}
+
+        def flip(props):
+            out = {}
+            for k, v in props.items():
+                k2 = sw.get(k, k)
+                if k == "facing":
+                    v = sw.get(v, v)
+                if k == "rotation":
+                    v = str((8 - int(v)) % 16)
+                out[k2] = v
+            return out
+
+        self.blocks = {(x, y, sz - 1 - z): (n, flip(p)) for (x, y, z), (n, p) in self.blocks.items()}
+        self.block_nbt = {(x, y, sz - 1 - z): v for (x, y, z), v in self.block_nbt.items()}
+        self.marker_pos = [(k, (x, y, sz - 1 - z)) for k, (x, y, z) in self.marker_pos]
+
     # ---------------------------------------------------------------- 저장
     def validate(self, pool: str) -> list[str]:
         errs = []
@@ -211,6 +258,8 @@ class Room:
         if pool in ("puzzle",) and not self.markers.get("trigger"):
             errs.append("퍼즐방은 [trigger] 필요 (없으면 /dg next 로만 진행)")
         # 마커(트리거 제외): 발밑이 단단하고, 마커를 포함한 2×2×2 가 비어 있어야 함
+        if pool != "boss" and self.markers.get("exit", 0) != 1:
+            errs.append("[exit] 표지판이 정확히 1개 필요 (doors())")
         for kind, (x, y, z) in self.marker_pos:
             if kind == "trigger":
                 continue
@@ -260,6 +309,9 @@ class Room:
 
     def save(self, root: str, pool: str, name: str, tags: list[str] | None = None, weight: int = 1,
              strict: bool = True) -> str:
+        if not getattr(self, "_doors_done", False):
+            self.doors(pool)
+            self._doors_done = True
         errs = self.validate(pool)
         if errs and strict:
             raise ValueError(f"{pool}/{name}: " + ", ".join(errs))

@@ -21,6 +21,7 @@ DeruyRPG 저장소(maybesnowflake/DeruyRPG) feature/dungeon 브랜치에서 정�
 | 풀 | camp · combat · elite · puzzle · shop · rest · event · miniboss · boss |
 | 태그 | vertical(수관길: 철퇴·활·쇠뇌) · water(수로: 삼지창·낚싯대) · narrow(회랑: 창·방패·검) · open(공터: 도끼·검) |
 | 형식 | roomgen 이 DataVersion 4189(1.21.4)로 저장 → 서버가 자동 변환 |
+| 문 (협곡 연결) | **입구 = 북쪽(z=0) 가장자리, `[spawn]` 의 x·높이** / **출구 = 남쪽 가장자리 `[exit]` 표지판** (기본: 가로 가운데·스폰 높이, `r.exit = (x, y)` 로 지정). `save()` 가 폭 3·높이 4 통로를 자동으로 뚫음. 캠프는 입구 없음, 보스방은 출구 없음. 스폰이 남쪽인 방은 `r.mirror_z()` |
 
 ## 목표 수 (정글 챕터)
 | 풀 | 수 | 메모 |
