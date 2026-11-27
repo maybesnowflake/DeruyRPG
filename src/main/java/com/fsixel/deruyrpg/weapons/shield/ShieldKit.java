@@ -512,7 +512,7 @@ public final class ShieldKit implements WeaponKit, Listener {
                 if (f < -0.3 || f > reach || side > halfW || y < -1 || y > 2.5) continue;
                 hit.add(e.getUniqueId());
                 if (!Damage.canHarm(p, e)) continue; // PvP 꺼짐·보호구역
-                e.setVelocity(forward.clone().multiply(1.3).setY(0.4));
+                Targets.velocity(e, forward.clone().multiply(1.3).setY(0.4)); // 넉백 면역이면 안 밀림
                 e.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, BASH_SLOW_TICKS, 2, false, true));
                 Location el = e.getLocation().add(0, e.getHeight() / 2, 0);
                 el.getWorld().spawnParticle(Particle.CRIT, el, 10, 0.3, 0.3, 0.3, 0.2);
@@ -604,21 +604,37 @@ public final class ShieldKit implements WeaponKit, Listener {
         Projectile pr = e.getEntity();
         Entity hit = e.getHitEntity();
         for (Sanctuary s : sanctuaries.values()) {
-            if (!s.isActive() || !s.contains(hit.getLocation())) continue;
+            if (!s.isActive()) continue;
             Player owner = Bukkit.getPlayer(s.owner());
-            if (owner == null || s.isFriendly(owner, pr)) continue;
-            Location origin = pr.getOrigin();
-            boolean fromOutside = pr.getShooter() instanceof Entity shooter
-                    ? !s.contains(shooter.getLocation())
-                    : origin == null || !s.contains(origin);
-            if (!fromOutside) continue;
-            e.setCancelled(true);
-            s.deflect(pr);
-            return;
+            if (owner == null) continue;
+            // 돔 밖에서 출발해 돔 경계를 지나온 투사체면 (고속 투사체 포함) 차단
+            if (s.blockOnHit(owner, pr, hit)) {
+                e.setCancelled(true);
+                return;
+            }
         }
     }
 
     // ------------------------------------------------------------------ 정리
+
+    /** 플러그인 종료: 진행 중 성역 전부 종료(느려짐·넉백 면역 modifier·포션·소환 방패 정리) + 피버 버프 해제. */
+    @Override
+    public void onPluginDisable() {
+        for (Sanctuary s : new java.util.ArrayList<>(sanctuaries.values())) {
+            try {
+                s.end(true);
+            } catch (Throwable ignored) {
+            }
+        }
+        sanctuaries.clear();
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            try {
+                stripFeverBuffs(p);
+                com.fsixel.deruyrpg.util.Cc.clearImmune(p);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
 
     /** 무기 해제(슬롯 변경·버리기·사망·접속 종료 등). 성역(궁극기)은 끊지 않음. 여러 번 불려도 안전. */
     @Override
