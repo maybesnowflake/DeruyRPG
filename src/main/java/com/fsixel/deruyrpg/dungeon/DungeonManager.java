@@ -334,8 +334,9 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
             return;
         }
         var gen = new com.fsixel.deruyrpg.dungeon.gen.CanyonGen(dworld.world(), rects, paths, 64, run.id * 31L + run.slot);
-        run.placed.add(gen.box());
-        placer.work(gen, () -> {
+        var area = gen.box();
+        run.placed.add(area);
+        placer.work(area, gen, () -> {
             run.gates.putAll(gen.gates);
             if (run.phase != Run.Phase.GENERATING) return;
             run.phase = Run.Phase.MOVING;
