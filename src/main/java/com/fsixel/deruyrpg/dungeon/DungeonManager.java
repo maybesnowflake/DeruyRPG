@@ -565,6 +565,12 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         e.setDroppedExp(0);
     }
 
+    /** 던전 슬라임은 분열하지 않음 (자식이 웨이브 추적에서 빠지는 문제 방지). */
+    @EventHandler(ignoreCancelled = true)
+    public void onSplit(org.bukkit.event.entity.SlimeSplitEvent e) {
+        if (e.getEntity().getPersistentDataContainer().has(mobKey, PersistentDataType.INTEGER)) e.setCancelled(true);
+    }
+
     private void clearMobs(Run run) {
         for (UUID id : run.mobs) {
             Entity en = Bukkit.getEntity(id);
