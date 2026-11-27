@@ -27,7 +27,9 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityShootBowEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.entity.ProjectileHitEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
@@ -218,9 +220,11 @@ public final class CrossbowKit implements WeaponKit, Listener {
         Player p = ctx.player();
         Integer end = slowUntil.get(p.getUniqueId());
         if (end == null) return;
-        if (end <= Bukkit.getCurrentTick()) {
+        int now = Bukkit.getCurrentTick();
+        if (end <= now) {
             slowUntil.remove(p.getUniqueId());
-            ctx.flash(Component.text("구속 화살 종료", NamedTextColor.GRAY));
+            // 다른 무기를 든 사이 끝났으면 다시 들 때 뒤늦게 알리지 않음
+            if (now - end <= 10) ctx.flash(Component.text("구속 화살 종료", NamedTextColor.GRAY));
             return;
         }
         Location hand = p.getLocation().add(0, 1.1, 0);
@@ -384,8 +388,22 @@ public final class CrossbowKit implements WeaponKit, Listener {
     @Override
     public void onUnequip(Player player) {
         // 여러 번 불려도 안전 (맵 제거만). 피버 연사 간격 상태 정리 — 피버가 남아 있으면 다시 들었을 때 우클릭으로 재개.
+        // 구속 화살 모드는 쿨다운을 치른 버프라 무기를 바꿔도 유지(남은 시간은 그대로 흐름) → 사망·접속 종료 때만 정리.
         lastShot.remove(player.getUniqueId());
-        slowUntil.remove(player.getUniqueId());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onDeath(PlayerDeathEvent e) {
+        UUID id = e.getEntity().getUniqueId();
+        slowUntil.remove(id);
+        lastShot.remove(id);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onQuit(PlayerQuitEvent e) {
+        UUID id = e.getPlayer().getUniqueId();
+        slowUntil.remove(id);
+        lastShot.remove(id);
     }
 
     // =====================================================================
@@ -495,7 +513,7 @@ public final class CrossbowKit implements WeaponKit, Listener {
             if (push.lengthSquared() > 1e-6) {
                 Vector kb = push.normalize().multiply(FEVER_KNOCKBACK).setY(0.08);
                 Bukkit.getScheduler().runTask(DeruyRPG.get(), () -> {
-                    if (target.isValid() && !target.isDead()) target.setVelocity(target.getVelocity().add(kb));
+                    if (target.isValid() && !target.isDead()) Targets.velocity(target, target.getVelocity().add(kb)); // 넉백 면역이면 무시
                 });
             }
         }
