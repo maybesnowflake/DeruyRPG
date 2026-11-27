@@ -21,6 +21,7 @@ DeruyRPG 저장소(maybesnowflake/DeruyRPG) feature/dungeon 브랜치에서 정�
 | 풀 | camp · combat · elite · puzzle · shop · rest · event · miniboss · boss |
 | 태그 | vertical(수관길: 철퇴·활·쇠뇌) · water(수로: 삼지창·낚싯대) · narrow(회랑: 창·방패·검) · open(공터: 도끼·검) |
 | 형식 | roomgen 이 DataVersion 4189(1.21.4)로 저장 → 서버가 자동 변환 |
+| 문 (협곡 연결) | **입구 = 북쪽(z=0) 가장자리, `[spawn]` 의 x·높이** / **출구 = 남쪽 가장자리 `[exit]` 표지판** (기본: 가로 가운데·스폰 높이, `r.exit = (x, y)` 로 지정). `save()` 가 폭 3·높이 4 통로를 자동으로 뚫음. 캠프는 입구 없음, 보스방은 출구 없음. 스폰이 남쪽인 방은 `r.mirror_z()` |
 
 ## 목표 수 (정글 챕터)
 | 풀 | 수 | 메모 |
@@ -35,7 +36,28 @@ DeruyRPG 저장소(maybesnowflake/DeruyRPG) feature/dungeon 브랜치에서 정�
 | miniboss | 1 | 완료 (moss_gate_small_01) |
 | boss | 1 | 완료 (sunken_floodgate_01) — 반경 ≥16 평지, 천장 ≥12, 물 링, 기둥 4 |
 
-현재 샘플(jungle_rooms.py): camp 1, combat 4(태그별 1), elite 1, puzzle 1, shop 1, rest 1, event 1, miniboss 1, boss 1.
+**현재 (2026-11-27, rooms/jungle): 목표 수 전부 채움 — 30개.** camp 1 · combat 12 (open/water/vertical/narrow × 3) · elite 4 (태그별 1) · puzzle 4 · shop 3 · rest 2 · event 2 · miniboss 1 · boss 1.
+
+| 풀 | 방 |
+|---|---|
+| combat open | jungle_clearing_open_01 · ruin_plaza_open_02 (가운데 단 + 기둥) · bamboo_meadow_open_03 (대나무 숲 + 언덕) |
+| combat water | flooded_channel_water_01 · mangrove_delta_water_02 (수로 2줄, 서쪽 다리 우회) · sunken_pool_water_03 (깊이 2 연못 + 징검돌) |
+| combat vertical | canopy_bridges_vertical_01 · temple_steps_vertical_02 (3단 피라미드, 정면 계단/옆 덩굴) · canopy_ladders_vertical_03 (6·12층 발판) |
+| combat narrow | ruined_corridor_narrow_01 · root_tunnel_narrow_02 (S자 뿌리 굴) · collapsed_gallery_narrow_03 (쌍회랑 + 벽 틈 3) |
+| elite | overgrown_arena_01 (open) · drowned_cistern_elite_01 (water) · canopy_throne_elite_01 (vertical) · guard_hall_elite_01 (narrow) |
+| puzzle | vine_knot_01 (매듭 3) · water_gauge_01 (수위 기둥 = 정답 레버) · trap_corridor_01 (압력판·발사기·마그마) · moss_glyph_lever_01 (벽화 이끼 = 정답 레버) |
+| shop / rest / event | wandering_trader_hut_01 · mossy_stall_shop_02 · temple_merchant_shop_03 / quiet_spring_01 · campfire_glade_rest_02 / trapped_explorer_01 · vine_shrine_event_02 (제단 레버 = [trigger]) |
+
+### 도구 (tools/rooms)
+- `jungle_kit.py` — 공용 부품: 잔해·기둥·통나무·대나무 숲·언덕·물길·계단·사다리·덩굴, `lever_lock`(레버 조합 자물쇠 → [trigger]), `lever_on_trigger`, `sign`(안내 표지판), `carve`
+- `roomgen.py` 검증(save strict) 추가: 마커 발밑 단단함 + 2×2×2 빈칸, 물이 방 밖/허공과 닿으면 실패. 레드스톤 가루 모양 자동 맞춤(`shape_redstone`) — **배치가 물리 업데이트 없이 되므로**(RoomPlacer `update(true,false)`) 가루 모양·신호 세기·횃불 켜짐을 저장 단계에서 안정 상태로 맞춰 둠
+- `check_circuits.py` — 퍼즐 회로 오프라인 검사: 초기 상태가 안정인지 + 레버 조합 전부 중 정답 1개만 램프를 켜는지
+- 방마다 이름으로 시드를 가름 → 방을 추가해도 기존 방 모양 그대로
+
+### 인게임 확인 필요
+- 레버 자물쇠 실제 동작 (시뮬레이터는 같은 높이 단순 회로만 봄), 함정 발사기 화살이 압력판 위 플레이어를 맞추는지
+- 사다리·덩굴 오르내림, 발판 울타리 틈, 대나무 블록 상태
+- `/dg rooms` 에 30개 표시, 방 배치 렉
 
 ## 디자인 기준
 - docs/JUNGLE_MAP.md "특기 무기 지형 보너스": 태그 방마다 특기 무기가 빛나는 지형 + 없어도 통과 가능한 대안

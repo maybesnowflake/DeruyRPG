@@ -30,6 +30,20 @@ DATA_VERSION = 4189
 
 AIR = "minecraft:air"
 
+# 마커 주변에 있어도 되는 블록 (통과 가능)
+_SOFT = {"air", "water", "short_grass", "tall_grass", "fern", "large_fern", "moss_carpet", "vine", "glow_lichen",
+         "lily_pad", "dandelion", "poppy", "blue_orchid", "allium", "azure_bluet", "oxeye_daisy", "cornflower",
+         "pink_petals", "dead_bush", "sugar_cane", "redstone_wire", "light"}
+# 레드스톤 가루가 이어지는 부품
+_RS = ("redstone_wire", "redstone_torch", "redstone_wall_torch", "lever", "repeater", "comparator",
+       "redstone_block", "target", "_button", "_pressure_plate")
+_DIRS = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
+_OPP = {"north": "south", "south": "north", "east": "west", "west": "east"}
+
+
+def _soft(name: str | None) -> bool:
+    return name is None or name.split(":")[-1] in _SOFT or name.endswith("_carpet")
+
 
 def _ns(block: str) -> str:
     return block if ":" in block else "minecraft:" + block
@@ -55,6 +69,9 @@ class Room:
         self.blocks: dict[tuple[int, int, int], tuple[str, dict[str, str]]] = {}
         self.block_nbt: dict[tuple[int, int, int], Compound] = {}
         self.markers: dict[str, int] = {}
+        self.marker_pos: list[tuple[str, tuple[int, int, int]]] = []
+        # 출구 (x, 바닥 위 y). None 이면 (가로 가운데, 스폰 높이). 협곡 길이 여기(남쪽 z 끝)에서 다음 방 북쪽 입구로 이어짐
+        self.exit: tuple[int, int] | None = None
 
     # ---------------------------------------------------------------- 기본
     def inside(self, x: int, y: int, z: int) -> bool:
@@ -66,6 +83,19 @@ class Room:
             return
         self.blocks[(x, y, z)] = _parse(block)
         self.block_nbt.pop((x, y, z), None)
+
+    def set_nbt(self, x: int, y: int, z: int, block: str, nbt: Compound) -> None:
+        """블록 + 블록 엔티티 NBT (상자·발사기 등)."""
+        self.set(x, y, z, block)
+        if self.inside(x, y, z):
+            self.block_nbt[(x, y, z)] = nbt
+
+    def container(self, x: int, y: int, z: int, block: str, items: list[tuple[str, int]]) -> None:
+        """발사기·통 등에 아이템 넣기. items = [("arrow", 64), ...]"""
+        kind = _parse(block)[0]
+        be = {"minecraft:barrel": "minecraft:barrel", "minecraft:chest": "minecraft:chest"}.get(kind, kind)
+        inv = [Compound({"Slot": nbtlib.Byte(i), "id": String(_ns(n)), "count": Int(c)}) for i, (n, c) in enumerate(items)]
+        self.set_nbt(x, y, z, block, Compound({"id": String(be), "Items": List[Compound](inv)}))
 
     def get(self, x: int, y: int, z: int) -> str | None:
         b = self.blocks.get((x, y, z))
@@ -138,7 +168,7 @@ class Room:
         opts = ["short_grass", "fern", "moss_carpet", "azalea", "flowering_azalea", "large_fern[half=lower]"]
         for x in range(x1, x2 + 1):
             for z in range(z1, z2 + 1):
-                if self.get(x, y, z) is None and rng.random() < chance:
+                if self.get(x, y, z) is None and not _soft(self.get(x, y - 1, z)) and rng.random() < chance:
                     b = rng.choice(opts)
                     self.set(x, y, z, b)
                     if b.startswith("large_fern"):
@@ -148,10 +178,16 @@ class Room:
     def marker(self, x: int, y: int, z: int, kind: str) -> None:
         """마커 표지판. kind: spawn | mob | boss | trigger. 바닥 바로 위 칸에 둘 것."""
         kind = kind.strip("[]").lower()
-        if kind not in ("spawn", "mob", "boss", "trigger"):
-            raise ValueError("마커는 spawn|mob|boss|trigger")
+        if kind not in ("spawn", "mob", "boss", "trigger", "exit"):
+            raise ValueError("마커는 spawn|mob|boss|trigger|exit")
         if kind == "spawn" and self.markers.get("spawn"):
             raise ValueError("[spawn] 은 방마다 1개")
+        if kind != "trigger":  # 마커 주변 장식 덤불은 치움 (서 있을 자리 확보)
+            for dx in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for dy in (0, 1):
+                        if (self.get(x + dx, y + dy, z + dz) or "").split(":")[-1] in ("azalea", "flowering_azalea"):
+                            self.blocks.pop((x + dx, y + dy, z + dz), None)
         self.set(x, y, z, "oak_sign[rotation=0]")
         lines = [f'"[{kind}]"', '""', '""', '""']  # 1.21.4 형식(JSON 문자열)
         text = Compound({"messages": List[String](lines), "color": String("black"), "has_glowing_text": nbtlib.Byte(0)})
@@ -163,6 +199,52 @@ class Room:
             "is_waxed": nbtlib.Byte(0),
         })
         self.markers[kind] = self.markers.get(kind, 0) + 1
+        self.marker_pos.append((kind, (x, y, z)))
+
+    # ---------------------------------------------------------------- 문 (협곡 연결)
+    def _lane(self, x: int, fy: int, zs) -> None:
+        """폭 3 · 높이 4 통로를 뚫고 바닥을 깖. 마커 칸은 건드리지 않음."""
+        keep = {p for _, p in self.marker_pos}
+        for z in zs:
+            for lx in (x - 1, x, x + 1):
+                if _soft(self.get(lx, fy, z)):
+                    self.set(lx, fy, z, "mossy_cobblestone")
+                for y in range(fy + 1, fy + 5):
+                    if (lx, y, z) not in keep:
+                        self.blocks.pop((lx, y, z), None)
+                        self.block_nbt.pop((lx, y, z), None)
+
+    def doors(self, pool: str) -> None:
+        """입구 = 북쪽(z=0) 가장자리, 스폰 x · 스폰 높이 / 출구 = 남쪽 가장자리 [exit] 마커.
+        플러그인(CanyonGen)이 방 사이 협곡 길을 이 두 점으로 이음. 캠프는 입구 없음, 보스방은 출구 없음."""
+        sx, _, sz = self.size
+        spawn = next(p for k, p in self.marker_pos if k == "spawn")
+        if pool != "camp":
+            self._lane(spawn[0], spawn[1] - 1, range(0, 3))
+        if pool != "boss":
+            ex, ey = self.exit or (sx // 2, spawn[1])
+            self._lane(ex, ey - 1, range(sz - 3, sz))
+            self.marker(ex, ey, sz - 2, "exit")
+
+    def mirror_z(self) -> None:
+        """남북 뒤집기 (스폰이 남쪽에 있는 방을 북쪽 입구 규칙에 맞출 때). 방향 속성도 같이 뒤집음."""
+        sz = self.size[2]
+        sw = {"north": "south", "south": "north"}
+
+        def flip(props):
+            out = {}
+            for k, v in props.items():
+                k2 = sw.get(k, k)
+                if k == "facing":
+                    v = sw.get(v, v)
+                if k == "rotation":
+                    v = str((8 - int(v)) % 16)
+                out[k2] = v
+            return out
+
+        self.blocks = {(x, y, sz - 1 - z): (n, flip(p)) for (x, y, z), (n, p) in self.blocks.items()}
+        self.block_nbt = {(x, y, sz - 1 - z): v for (x, y, z), v in self.block_nbt.items()}
+        self.marker_pos = [(k, (x, y, sz - 1 - z)) for k, (x, y, z) in self.marker_pos]
 
     # ---------------------------------------------------------------- 저장
     def validate(self, pool: str) -> list[str]:
@@ -175,13 +257,65 @@ class Room:
             errs.append("보스방은 [boss] 필요")
         if pool in ("puzzle",) and not self.markers.get("trigger"):
             errs.append("퍼즐방은 [trigger] 필요 (없으면 /dg next 로만 진행)")
+        # 마커(트리거 제외): 발밑이 단단하고, 마커를 포함한 2×2×2 가 비어 있어야 함
+        if pool != "boss" and self.markers.get("exit", 0) != 1:
+            errs.append("[exit] 표지판이 정확히 1개 필요 (doors())")
+        for kind, (x, y, z) in self.marker_pos:
+            if kind == "trigger":
+                continue
+            below = self.get(x, y - 1, z)
+            if y == 0 or _soft(below):
+                errs.append(f"[{kind}] {x},{y},{z}: 발밑이 비었음")
+            ok = False
+            for ox in (0, -1):
+                for oz in (0, -1):
+                    cells = [(x + ox + dx, y + dy, z + oz + dz) for dx in (0, 1) for dy in (0, 1) for dz in (0, 1)]
+                    if all(self.inside(*c) and (c == (x, y, z) or _soft(self.get(*c))) for c in cells):
+                        ok = True
+            if not ok:
+                errs.append(f"[{kind}] {x},{y},{z}: 주변 2×2×2 가 막힘")
+        # 물이 방 밖(허공)으로 샐 수 있는 자리 — 빈 월드라 업데이트 한 번에 폭포가 됨
+        leaks = 0
+        for (x, y, z), (n, _) in self.blocks.items():
+            if n != "minecraft:water":
+                continue
+            if self.get(x, y - 1, z) is None:
+                leaks += 1
+                continue
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                if not self.inside(x + dx, y, z + dz):
+                    leaks += 1
+                    break
+        if leaks:
+            errs.append(f"물 {leaks}칸이 방 밖/허공과 닿음 (가장자리에 둑을 둘 것)")
         return errs
+
+    def shape_redstone(self) -> None:
+        """레드스톤 가루 모양(연결 방향)을 주변 부품에 맞춤. 배치 시 물리 업데이트가 없어서 미리 맞춰 둠.
+        연결이 1개면 반대쪽으로 뻗어 끝 블록을 가리킴(그 블록에 신호 전달)."""
+        for (x, y, z), (name, props) in self.blocks.items():
+            if name != "minecraft:redstone_wire":
+                continue
+            conns = []
+            for d, (dx, dz) in _DIRS.items():
+                n = self.get(x + dx, y, z + dz) or ""
+                if any(n.endswith(k) for k in _RS):
+                    conns.append(d)
+            if len(conns) == 1:
+                conns.append(_OPP[conns[0]])
+            for d in _DIRS:
+                props[d] = "side" if d in conns else "none"
+            props.setdefault("power", "0")
 
     def save(self, root: str, pool: str, name: str, tags: list[str] | None = None, weight: int = 1,
              strict: bool = True) -> str:
+        if not getattr(self, "_doors_done", False):
+            self.doors(pool)
+            self._doors_done = True
         errs = self.validate(pool)
         if errs and strict:
             raise ValueError(f"{pool}/{name}: " + ", ".join(errs))
+        self.shape_redstone()
         palette: list[tuple[str, tuple]] = []
         index: dict[tuple, int] = {}
         blocks = []

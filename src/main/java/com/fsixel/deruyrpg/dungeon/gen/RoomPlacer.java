@@ -1,6 +1,7 @@
 package com.fsixel.deruyrpg.dungeon.gen;
 
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
@@ -13,6 +14,7 @@ import org.bukkit.structure.Palette;
 import org.bukkit.util.BlockVector;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 방 배치·정리를 틱당 예산으로 나눠 처리 (대형 구조물 동기 배치 렉 방지).
@@ -31,6 +33,8 @@ public final class RoomPlacer {
         public Location spawn;
         public Location boss;
         public Location trigger;
+        /** 출구 [exit] (남쪽 가장자리 통로) — 협곡 길 출발점 */
+        public Location exit;
         public final List<Location> mobs = new ArrayList<>();
 
         Placed(String room, Location origin, BlockVector size) {
@@ -49,8 +53,10 @@ public final class RoomPlacer {
 
     private final Deque<Job> jobs = new ArrayDeque<>();
     private final BukkitTask task;
+    private final Plugin plugin;
 
     public RoomPlacer(Plugin plugin) {
+        this.plugin = plugin;
         task = plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, 1, 1);
     }
 
@@ -58,9 +64,50 @@ public final class RoomPlacer {
         int budget = BUDGET;
         while (budget > 0 && !jobs.isEmpty()) {
             Job j = jobs.peekFirst();
+            int before = budget;
             budget = j.run(budget);
             if (j.done()) jobs.pollFirst();
+            else if (budget == before) break; // 청크 로딩 대기 중
         }
+    }
+
+    /**
+     * 작업 영역의 청크를 비동기로 미리 불러와 티켓으로 붙잡아 둔 뒤 실행.
+     * 메인 스레드에서 새 청크를 하나씩 동기 로딩하면 서버가 멈춤 (워치독 "not responded for 10 seconds").
+     */
+    private Job loaded(World w, int x1, int z1, int x2, int z2, Job inner) {
+        List<CompletableFuture<Chunk>> fs = new ArrayList<>();
+        for (int cx = x1 >> 4; cx <= x2 >> 4; cx++)
+            for (int cz = z1 >> 4; cz <= z2 >> 4; cz++)
+                fs.add(w.getChunkAtAsync(cx, cz, true).thenApply(c -> {
+                    c.addPluginChunkTicket(plugin);
+                    return c;
+                }));
+        CompletableFuture<Void> all = CompletableFuture.allOf(fs.toArray(CompletableFuture[]::new));
+        return new Job() {
+            boolean released;
+
+            @Override
+            public int run(int budget) {
+                if (!all.isDone()) return budget;
+                int left = inner.run(budget);
+                if (inner.done() && !released) {
+                    released = true;
+                    for (var f : fs) f.join().removePluginChunkTicket(plugin);
+                }
+                return left;
+            }
+
+            @Override
+            public boolean done() {
+                return all.isDone() && inner.done();
+            }
+        };
+    }
+
+    private Job loaded(Location o, BlockVector size, Job inner) {
+        return loaded(o.getWorld(), o.getBlockX(), o.getBlockZ(), o.getBlockX() + size.getBlockX() - 1,
+                o.getBlockZ() + size.getBlockZ() - 1, inner);
     }
 
     public void shutdown() {
@@ -75,7 +122,7 @@ public final class RoomPlacer {
         List<Palette> pals = room.structure().getPalettes();
         List<BlockState> blocks = pals.isEmpty() ? List.of() : pals.getFirst().getBlocks();
         World w = origin.getWorld();
-        jobs.add(new Job() {
+        jobs.add(loaded(origin, room.size(), new Job() {
             int i;
             boolean finished;
 
@@ -94,6 +141,7 @@ public final class RoomPlacer {
                             case "[boss]" -> out.boss = c;
                             case "[mob]" -> out.mobs.add(c);
                             case "[trigger]" -> out.trigger = at.clone();
+                            case "[exit]" -> out.exit = c;
                             default -> marker = false;
                         }
                         if (marker) {
@@ -114,8 +162,30 @@ public final class RoomPlacer {
             public boolean done() {
                 return finished;
             }
-        });
+        }));
         return out;
+    }
+
+    /** 임의 작업을 틱 예산으로 나눠 실행. steps.next() = 이번 걸음이 쓴 블록 수. */
+    public void work(Placed area, Iterator<Integer> steps, Runnable done) {
+        jobs.add(loaded(area.origin, area.size, new Job() {
+            boolean finished;
+
+            @Override
+            public int run(int budget) {
+                while (budget > 0 && steps.hasNext()) budget -= Math.max(1, steps.next());
+                if (!steps.hasNext() && !finished) {
+                    finished = true;
+                    done.run();
+                }
+                return Math.max(0, budget);
+            }
+
+            @Override
+            public boolean done() {
+                return finished;
+            }
+        }));
     }
 
     /** 영역을 공기로 비움 (판 종료 시). */
@@ -123,7 +193,7 @@ public final class RoomPlacer {
         World w = origin.getWorld();
         int sx = size.getBlockX(), sy = size.getBlockY(), sz = size.getBlockZ();
         long total = (long) sx * sy * sz;
-        jobs.add(new Job() {
+        jobs.add(loaded(origin, size, new Job() {
             long i;
             boolean finished;
 
@@ -147,6 +217,6 @@ public final class RoomPlacer {
             public boolean done() {
                 return finished;
             }
-        });
+        }));
     }
 }
