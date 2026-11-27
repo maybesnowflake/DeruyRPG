@@ -498,7 +498,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     }
 
     private void checkWipe(Run run) {
-        if (run.phase == Run.Phase.ENDED || run.phase == Run.Phase.FAILING || run.phase == Run.Phase.RETRY) return;
+        if (run.phase == Run.Phase.ENDED || run.phase == Run.Phase.FAILING) return; // RETRY 중에도 목숨 소진은 검사
         if (!run.aliveMembers().isEmpty()) return;
         if (!run.anyLivesLeft()) {
             // 전원 소진: 즉시 진행 불가 상태로 (tick·클리어·투표 이동 모두 멈춤) → 3초 뒤 귀환
@@ -510,7 +510,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
             }, 60);
             return;
         }
-        // 투표·이동 중에는 목숨 남은 관전자가 다음 라운드에서 부활하므로 재도전 불필요
+        // 투표·이동 중엔 목숨 남은 관전자가 다음 라운드에서 부활, RETRY 중엔 이미 재도전 예약됨
         if (run.phase != Run.Phase.ROUND) return;
         // 전멸이지만 목숨 남은 사람이 있음 → 그 라운드 재도전
         run.phase = Run.Phase.RETRY;
