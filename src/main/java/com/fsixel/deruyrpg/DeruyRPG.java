@@ -7,6 +7,7 @@ import com.fsixel.deruyrpg.core.HudTask;
 import com.fsixel.deruyrpg.core.InputListener;
 import com.fsixel.deruyrpg.core.KitRegistry;
 import com.fsixel.deruyrpg.core.ManaManager;
+import com.fsixel.deruyrpg.core.TrainingDummy;
 import com.fsixel.deruyrpg.weapons.axe.AxeKit;
 import com.fsixel.deruyrpg.weapons.bow.BowKit;
 import com.fsixel.deruyrpg.weapons.crossbow.CrossbowKit;
@@ -27,6 +28,8 @@ public final class DeruyRPG extends JavaPlugin {
     private Cooldowns cooldowns;
     private FeverManager fever;
     private ManaManager mana;
+    private TrainingDummy dummy;
+    private HudTask hud;
 
     public static DeruyRPG get() {
         return instance;
@@ -56,7 +59,10 @@ public final class DeruyRPG extends JavaPlugin {
         kits.register(new RodKit());
 
         getServer().getPluginManager().registerEvents(new InputListener(this), this);
-        new HudTask(this).runTaskTimer(this, HudTask.PERIOD, HudTask.PERIOD);
+        dummy = new TrainingDummy(this);
+        getServer().getPluginManager().registerEvents(dummy, this);
+        hud = new HudTask(this);
+        hud.runTaskTimer(this, HudTask.PERIOD, HudTask.PERIOD);
 
         PluginCommand cmd = getCommand("rpg");
         if (cmd != null) {
@@ -71,4 +77,40 @@ public final class DeruyRPG extends JavaPlugin {
     public Cooldowns cooldowns() { return cooldowns; }
     public FeverManager fever() { return fever; }
     public ManaManager mana() { return mana; }
+    public TrainingDummy dummy() { return dummy; }
+    public HudTask hud() { return hud; }
+
+    /** /reload·종료 시 정리: 무기 해제 처리, 기절 해제, 연출·소환 엔티티 제거. */
+    @Override
+    public void onDisable() {
+        if (hud != null) {
+            for (org.bukkit.entity.Player p : getServer().getOnlinePlayers()) {
+                try {
+                    hud.forget(p);
+                } catch (Throwable t) {
+                    getLogger().warning("종료 정리 오류: " + t);
+                }
+            }
+        }
+        if (kits != null) {
+            for (com.fsixel.deruyrpg.api.WeaponKit k : kits.all()) {
+                try {
+                    k.onPluginDisable();
+                } catch (Throwable t) {
+                    getLogger().warning("[" + k.id() + "] 종료 정리 오류: " + t);
+                }
+            }
+        }
+        com.fsixel.deruyrpg.util.Cc.unstunAll();
+        int removed = 0;
+        for (org.bukkit.World w : getServer().getWorlds()) {
+            for (org.bukkit.entity.Entity en : w.getEntities()) {
+                if (com.fsixel.deruyrpg.util.Targets.isSummon(en)) {
+                    en.remove();
+                    removed++;
+                }
+            }
+        }
+        if (removed > 0) getLogger().info("연출·소환 엔티티 " + removed + "개 제거");
+    }
 }

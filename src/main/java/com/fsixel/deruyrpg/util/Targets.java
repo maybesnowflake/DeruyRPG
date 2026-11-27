@@ -38,7 +38,9 @@ public final class Targets {
     public static boolean isAlly(Player self, Entity other) {
         if (other.equals(self)) return true;
         if (!(other instanceof Player op)) return false;
-        Team team = self.getScoreboard().getEntryTeam(self.getName());
+        // 메인 스코어보드(/team) 기준 — TAB 같은 플러그인이 개인 스코어보드를 줘도 팀 판정 유지
+        Team team = org.bukkit.Bukkit.getScoreboardManager().getMainScoreboard().getEntryTeam(self.getName());
+        if (team == null) team = self.getScoreboard().getEntryTeam(self.getName());
         return team != null && team.hasEntry(op.getName());
     }
 
@@ -114,15 +116,35 @@ public final class Targets {
         return r != null && r.getHitEntity() instanceof Player p ? p : null;
     }
 
-    /** 대상을 center 쪽으로 당김 (strength ≈ 0.3~1.5). */
+    /**
+     * 스킬로 강제 이동(넉백·끌어오기·띄우기)시켜도 되는지. 넉백 저항 1 이상이거나 CC 면역이면 false.
+     * 직접 setVelocity 로 적을 움직이는 곳은 반드시 이걸 먼저 확인할 것.
+     */
+    public static boolean canMove(LivingEntity target) {
+        if (Cc.isImmune(target)) return false;
+        var kr = target.getAttribute(org.bukkit.attribute.Attribute.KNOCKBACK_RESISTANCE);
+        return kr == null || kr.getValue() < 1.0;
+    }
+
+    /** 스킬로 적의 속도를 직접 바꿀 때 사용 — 넉백 면역(canMove false)이면 무시. 바뀌었으면 true. */
+    public static boolean velocity(LivingEntity target, Vector v) {
+        if (!canMove(target)) return false;
+        if (!Double.isFinite(v.getX()) || !Double.isFinite(v.getY()) || !Double.isFinite(v.getZ())) return false; // NaN 방어
+        target.setVelocity(v);
+        return true;
+    }
+
+    /** 대상을 center 쪽으로 당김 (strength ≈ 0.3~1.5). 넉백 면역이면 무시. */
     public static void pull(LivingEntity target, Location center, double strength) {
+        if (!canMove(target)) return;
         Vector v = center.toVector().subtract(target.getLocation().toVector());
         if (v.lengthSquared() < 1e-6) return;
         target.setVelocity(v.normalize().multiply(strength).setY(0.25));
     }
 
-    /** 대상을 from 에서 밀어냄. */
+    /** 대상을 from 에서 밀어냄. 넉백 면역이면 무시. */
     public static void push(LivingEntity target, Location from, double strength, double up) {
+        if (!canMove(target)) return;
         Vector v = target.getLocation().toVector().subtract(from.toVector()).setY(0);
         if (v.lengthSquared() < 1e-6) v = new Vector(0, 0, 0.01);
         target.setVelocity(v.normalize().multiply(strength).setY(up));

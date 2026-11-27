@@ -63,12 +63,37 @@ public final class SkillContext {
     // ---- 피버 ----
     public FeverManager fever() { return plugin.fever(); }
 
-    public boolean isFever() { return plugin.fever().isFever(player); }
+    /** 이 무기로 시작한 피버가 진행 중인지 (다른 무기 궁극기의 피버는 false). */
+    public boolean isFever() { return plugin.fever().isFever(player, kit.id()); }
+
+    /** 액션바에 잠깐(기본 1.5초) 메시지 표시 — 코어 HUD가 덮어쓰지 않음. p.sendActionBar 대신 이걸 쓸 것. */
+    public void flash(net.kyori.adventure.text.Component message) {
+        com.fsixel.deruyrpg.core.HudTask.flash(player, message, 30);
+    }
 
     // ---- 마나 ----
     public ManaManager mana() { return plugin.mana(); }
 
-    /** 마나(0.0~1.0)를 amount 만큼 쓸 수 있으면 소모하고 true. */
+    /** 마나가 amount 이상 있는지 (소모 안 함). */
+    public boolean hasMana(float amount) {
+        return plugin.mana().has(player, amount);
+    }
+
+    /**
+     * 쿨다운 확인 → 마나 확인 → 둘 다 OK 면 쿨다운 걸고 마나 소모. 하나라도 실패하면 아무것도 안 씀.
+     * (연타 시 스킬은 안 나가는데 마나만 빠지는 문제 방지용)
+     */
+    public boolean tryCooldownAndMana(String slot, int ticks, float mana) {
+        if (onCooldown(slot)) return false;
+        if (!plugin.mana().has(player, mana)) {
+            plugin.mana().tryConsume(player, mana); // 부족 메시지만 표시
+            return false;
+        }
+        if (!tryCooldown(slot, ticks)) return false;
+        return plugin.mana().tryConsume(player, mana);
+    }
+
+    /** 마나(기본 최대 1.0)를 amount 만큼 쓸 수 있으면 소모하고 true. */
     public boolean tryMana(float amount) {
         return plugin.mana().tryConsume(player, amount);
     }

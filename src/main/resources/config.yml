@@ -1,13 +1,21 @@
 # DeruyRPG 공통 설정
 
 fever:
-  # 무기로 때릴 때 게이지 증가량 (최대 100)
+  # 게이지 최대치 (가득 차야 F 궁극기 사용). 게임 안에서 /rpg fevercfg 로도 변경 가능
+  max: 100.0
+  # 평타(근접·화살)로 때릴 때 증가량
   gain-on-hit: 5.0
+  # 스킬 피해 1회당 증가량 (다단히트·광역은 맞을 때마다)
+  gain-on-skill-hit: 5.0
+  # 스킬 피해로 게이지가 오르는 최소 간격(틱, 20틱=1초). 0 = 제한 없음
+  skill-gain-interval-ticks: 0
   # 피격 시 게이지 증가량
   gain-on-hurt: 2.0
-  # 피버 중 스킬 쿨다운 배율 (0.5 = 절반)
-  cooldown-multiplier: 0.5
+  # 피버 중 공통 스킬 쿨다운 배율 (1.0 = 변화 없음, 무기별 피버 효과는 각 무기에서)
+  cooldown-multiplier: 1.0
 
 mana:
   # 초당 마나 회복 (1.0 = 가득)
   regen-per-second: 0.05
+
+# 피버(궁극기 후) 기본 지속시간은 무기 코드 기본 15초

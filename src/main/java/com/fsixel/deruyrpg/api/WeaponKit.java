@@ -47,9 +47,22 @@ public interface WeaponKit {
     /** 궁극기. 피버 게이지가 가득일 때만 호출됨. */
     default void onUltimate(SkillContext ctx) {}
 
-    /** 피버 지속 시간(틱). 무기별로 바꾸고 싶으면 오버라이드. */
+    /** 피버 지속 시간(틱). 기본 15초. 무기별로 바꾸고 싶으면 오버라이드. */
     default int feverDurationTicks() {
-        return 120;
+        return 300;
+    }
+
+    /**
+     * 액션바 끝에 붙일 무기 전용 표시 (중첩 수, 남은 화살, 모드 등). null 이면 없음.
+     * 5틱마다 호출되니 가볍게.
+     */
+    default net.kyori.adventure.text.@org.jetbrains.annotations.Nullable Component hudExtra(SkillContext ctx) {
+        return null;
+    }
+
+    /** 플레이어 상태(폼/모드)에 따라 쿨다운 슬롯을 다르게 보여주고 싶을 때 오버라이드. */
+    default String[] cooldownSlots(Player player) {
+        return cooldownSlots();
     }
 
     /** 이 무기가 마나(경험치 바)를 쓰는지. true 면 들고 있는 동안 경험치 바에 마나가 표시됨. */
@@ -61,6 +74,12 @@ public interface WeaponKit {
     default String[] cooldownSlots() {
         return new String[]{Slot.RIGHT, Slot.SHIFT_RIGHT};
     }
+
+    /**
+     * 플러그인 종료(/reload·서버 종료) 직전 1회 호출. 진행 중인 궁극기·장판 등이 플레이어에게 남긴
+     * attribute modifier·포션·상태를 전부 되돌릴 것 (태스크는 이후 자동 취소됨).
+     */
+    default void onPluginDisable() {}
 
     /** 무기가 손에서 빠질 때 정리용 (소환물 제거 등). */
     default void onUnequip(Player player) {}
