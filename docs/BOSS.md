@@ -32,7 +32,7 @@
 | 연계 | 2페이즈 체력 절반 아래에서는 덩굴 분출 직후 독침 연계 | — |
 
 ## 설정 (config.yml `boss.moss-warden`)
-`health`(1페이즈 최대 체력, 기본 400), `phase2-health-multiplier`(1.5), `damage-multiplier`(1.0), `spawn`(보스방 좌표).
+`health`(1페이즈 최대 체력, 기본 200 → 2페이즈 300), `phase2-health-multiplier`(1.5), `damage-multiplier`(1.0), `spawn`(보스방 좌표).
 
 ## 테스트 명령
 `/rpg boss setspawn` → `/rpg boss spawn` (또는 `spawn here`, 콘솔 `spawn <world> <x> <y> <z> [yaw] [p2]`)

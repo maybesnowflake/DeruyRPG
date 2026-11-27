@@ -10,7 +10,7 @@ import org.jetbrains.annotations.Nullable;
 public final class BossSettings {
 
     /** 1페이즈 최대 체력 */
-    public double health = 400.0;
+    public double health = 200.0;
     /** 방어력 (바닐라 ARMOR, 최대 30) — 평타·투사체·일반 스킬 피해를 줄임. 관통(음파)·마법 피해는 무시 */
     public double armor = 10.0;
     /** 방어 강도 (바닐라 ARMOR_TOUGHNESS, 최대 20) — 큰 한 방 피해도 덜 뚫리게 함 */
