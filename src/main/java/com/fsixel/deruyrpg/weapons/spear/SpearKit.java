@@ -85,6 +85,8 @@ public final class SpearKit implements WeaponKit, Listener {
     private final Map<UUID, List<Entity>> summons = new ConcurrentHashMap<>();
     /** 피버 돌진 내부 쿨 (다음 사용 가능 틱). */
     private final Map<UUID, Integer> lungeReady = new ConcurrentHashMap<>();
+    /** 마지막으로 인벤토리 창 사거리를 맞춘 상태 ("피버여부:손슬롯") — 바뀔 때만 인벤토리를 훑음. */
+    private final Map<UUID, String> reachSynced = new ConcurrentHashMap<>();
 
     @Override
     public String id() {
@@ -129,9 +131,15 @@ public final class SpearKit implements WeaponKit, Listener {
         if (range != null) item.setData(DataComponentTypes.ATTACK_RANGE, range);
     }
 
-    /** 바닐라 창 사거리 + 리치 보너스 + extra. 항상 새 바닐라 값에서 계산하므로 멱등. */
+    /** 바닐라 네더라이트 창 attack_range (한 번만 계산해 재사용). */
+    private static AttackRange vanillaRange;
+
+    /** 바닐라 창 사거리 + 리치 보너스 + extra. 항상 바닐라 값에서 계산하므로 멱등. */
     private static AttackRange attackRange(float extra) {
-        AttackRange range = new ItemStack(Material.NETHERITE_SPEAR).getData(DataComponentTypes.ATTACK_RANGE);
+        if (vanillaRange == null) {
+            vanillaRange = new ItemStack(Material.NETHERITE_SPEAR).getData(DataComponentTypes.ATTACK_RANGE);
+        }
+        AttackRange range = vanillaRange;
         if (range == null) return null;
         float add = (float) REACH_BONUS + extra;
         return AttackRange.attackRange()
@@ -169,6 +177,14 @@ public final class SpearKit implements WeaponKit, Listener {
         // 들고 있는 창만 피버 사거리, 나머지 창(인벤토리·커서)은 항상 원래 사거리.
         PlayerInventory inv = p.getInventory();
         int held = inv.getHeldItemSlot();
+        String state = on + ":" + held;
+        if (state.equals(reachSynced.get(p.getUniqueId()))) {
+            // 상태 그대로면 손에 든 창만 확인 (새로 받은 창 등)
+            ItemStack hand = inv.getItem(held);
+            if (syncItemRange(hand, on)) inv.setItem(held, hand);
+            return;
+        }
+        reachSynced.put(p.getUniqueId(), state);
         ItemStack[] contents = inv.getContents();
         for (int i = 0; i < contents.length; i++) {
             if (syncItemRange(contents[i], on && i == held)) inv.setItem(i, contents[i]);
@@ -370,7 +386,7 @@ public final class SpearKit implements WeaponKit, Listener {
             for (LivingEntity t : Targets.frontBox(p, 3, 5, 2.5)) {
                 t.setNoDamageTicks(0);
                 if (!Damage.skill(p, t, dmg)) continue;
-                t.setVelocity(fwd.clone().multiply(0.9).setY(0.3));
+                Targets.velocity(t, fwd.clone().multiply(0.9).setY(0.3)); // 넉백 면역이면 안 밀림
                 Fx.burst(t.getLocation().add(0, t.getHeight() * 0.6, 0), Particle.ENCHANTED_HIT, 12, 0.3);
             }
         }, 4L);
@@ -417,6 +433,7 @@ public final class SpearKit implements WeaponKit, Listener {
      */
     @Override
     public void onUnequip(Player player) {
+        reachSynced.remove(player.getUniqueId());
         setFeverReach(player, false);
         lungeReady.remove(player.getUniqueId());
         List<BukkitTask> l = tasks.remove(player.getUniqueId());
@@ -430,5 +447,17 @@ public final class SpearKit implements WeaponKit, Listener {
                 }
             }
         }
+    }
+
+    /** 플러그인 종료: 피버 사거리 attribute 제거 + 인벤토리 창 사거리 원복, 진행 작업·연출 정리 (군단 병사는 코어가 summon 제거). */
+    @Override
+    public void onPluginDisable() {
+        for (Player p : org.bukkit.Bukkit.getOnlinePlayers()) {
+            try {
+                onUnequip(p);
+            } catch (Throwable ignored) {
+            }
+        }
+        reachSynced.clear();
     }
 }
