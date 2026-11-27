@@ -11,6 +11,10 @@ public final class BossSettings {
 
     /** 1페이즈 최대 체력 */
     public double health = 400.0;
+    /** 방어력 (바닐라 ARMOR, 최대 30) — 평타·투사체·일반 스킬 피해를 줄임. 관통(음파)·마법 피해는 무시 */
+    public double armor = 10.0;
+    /** 방어 강도 (바닐라 ARMOR_TOUGHNESS, 최대 20) — 큰 한 방 피해도 덜 뚫리게 함 */
+    public double armorToughness = 4.0;
     /** 보스가 주는 모든 피해 배율 */
     public double damageMultiplier = 1.0;
     /** 2페이즈 최대 체력 = health × 이 값 */
@@ -21,6 +25,8 @@ public final class BossSettings {
     public void load(@Nullable ConfigurationSection sec) {
         if (sec == null) return;
         health = Math.max(1.0, sec.getDouble("health", health));
+        armor = Math.max(0.0, Math.min(30.0, sec.getDouble("armor", armor)));
+        armorToughness = Math.max(0.0, Math.min(20.0, sec.getDouble("armor-toughness", armorToughness)));
         damageMultiplier = Math.max(0.0, sec.getDouble("damage-multiplier", damageMultiplier));
         phase2HealthMultiplier = Math.max(0.1, sec.getDouble("phase2-health-multiplier", phase2HealthMultiplier));
         spawn = null;
@@ -37,6 +43,8 @@ public final class BossSettings {
 
     public void save(ConfigurationSection sec) {
         sec.set("health", health);
+        sec.set("armor", armor);
+        sec.set("armor-toughness", armorToughness);
         sec.set("damage-multiplier", damageMultiplier);
         sec.set("phase2-health-multiplier", phase2HealthMultiplier);
         if (spawn == null || spawn.getWorld() == null) {

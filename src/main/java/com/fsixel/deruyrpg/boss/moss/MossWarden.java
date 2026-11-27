@@ -184,6 +184,8 @@ public final class MossWarden {
         setAttr(hitbox, Attribute.MAX_HEALTH, hp);
         setAttr(hitbox, Attribute.ATTACK_DAMAGE, 0);
         setAttr(hitbox, Attribute.KNOCKBACK_RESISTANCE, 1);
+        setAttr(hitbox, Attribute.ARMOR, cfg.armor);
+        setAttr(hitbox, Attribute.ARMOR_TOUGHNESS, cfg.armorToughness);
         hitbox.setHealth(hp);
     }
 

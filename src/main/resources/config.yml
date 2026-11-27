@@ -27,6 +27,10 @@ boss:
     health: 400.0
     # 2페이즈 최대 체력 = health × 이 값
     phase2-health-multiplier: 1.5
+    # 방어력 (바닐라 갑옷 수치, 0~30) — 평타·투사체·일반 스킬 피해 감소. 관통(워든 음파 등)·마법 피해는 방어력 무시
+    armor: 10.0
+    # 방어 강도 (0~20) — 철퇴 낙하 같은 큰 한 방이 방어력을 덜 뚫게 함
+    armor-toughness: 4.0
     # 보스가 주는 모든 피해 배율
     damage-multiplier: 1.0
     # 보스방 좌표 — 게임 안에서 /rpg boss setspawn 으로 저장 (보스는 저장한 사람이 바라보던 방향을 봄)
