@@ -202,7 +202,7 @@ final class AncientLegion {
                     }
                 }
                 // 피해가 들어간 적만 계속 앞으로 밀어냄 (PvP 꺼짐·보호구역이면 안 밂)
-                if (passed) t.setVelocity(forward.clone().multiply(1.1).setY(0.35));
+                if (passed) Targets.velocity(t, forward.clone().multiply(1.1).setY(0.35)); // 넉백 면역이면 안 밀림
             }
         }
         if (!soldiers.isEmpty() && soldiers.get(0).isValid()) {
