@@ -32,6 +32,7 @@ public final class DeruyRPG extends JavaPlugin {
     private TrainingDummy dummy;
     private HudTask hud;
     private BossManager bosses;
+    private com.fsixel.deruyrpg.dungeon.DungeonManager dungeons;
 
     public static DeruyRPG get() {
         return instance;
@@ -65,6 +66,13 @@ public final class DeruyRPG extends JavaPlugin {
         getServer().getPluginManager().registerEvents(dummy, this);
         bosses = new BossManager(this);
         getServer().getPluginManager().registerEvents(bosses, this);
+        dungeons = new com.fsixel.deruyrpg.dungeon.DungeonManager(this);
+        getServer().getPluginManager().registerEvents(dungeons, this);
+        PluginCommand dg = getCommand("dg");
+        if (dg != null) {
+            dg.setExecutor(dungeons);
+            dg.setTabCompleter(dungeons);
+        }
         hud = new HudTask(this);
         hud.runTaskTimer(this, HudTask.PERIOD, HudTask.PERIOD);
 
@@ -84,6 +92,7 @@ public final class DeruyRPG extends JavaPlugin {
     public TrainingDummy dummy() { return dummy; }
     public HudTask hud() { return hud; }
     public BossManager bosses() { return bosses; }
+    public com.fsixel.deruyrpg.dungeon.DungeonManager dungeons() { return dungeons; }
 
     /** /reload·종료 시 정리: 무기 해제 처리, 기절 해제, 연출·소환 엔티티 제거. */
     @Override
@@ -104,6 +113,13 @@ public final class DeruyRPG extends JavaPlugin {
                 } catch (Throwable t) {
                     getLogger().warning("[" + k.id() + "] 종료 정리 오류: " + t);
                 }
+            }
+        }
+        if (dungeons != null) {
+            try {
+                dungeons.stopAll(); // 진행 중 던전 → 귀환·게임모드 복구
+            } catch (Throwable t) {
+                getLogger().warning("던전 정리 오류: " + t);
             }
         }
         if (bosses != null) {

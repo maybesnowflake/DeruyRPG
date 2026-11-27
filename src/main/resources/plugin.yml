@@ -10,8 +10,15 @@ commands:
     description: DeruyRPG 무기 지급·테스트·보스
     usage: /rpg <give|fever|fevercfg|mana|reset|dummy|boss|list>
     permission: deruyrpg.admin
+  dg:
+    description: 던전 (투표·진행·상태, 관리 명령은 deruyrpg.admin)
+    usage: /dg <status|vote|next|leave|start|stop|set|setreturn|reload|lives>
+    permission: deruyrpg.dungeon
 
 permissions:
+  deruyrpg.dungeon:
+    description: /dg 기본 명령 (투표·다음·상태·나가기)
+    default: true
   deruyrpg.admin:
     description: /rpg 명령어
     default: op
