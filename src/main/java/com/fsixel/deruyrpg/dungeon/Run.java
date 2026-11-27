@@ -10,7 +10,7 @@ import java.util.*;
 
 /** 파티 한 팀의 던전 진행 상태. 규칙은 docs/JUNGLE_MAP.md "목숨 규칙". */
 final class Run {
-    enum Phase { ROUND, VOTE, MOVING, RETRY, FAILING, ENDED }
+    enum Phase { ROUND, VOTE, MOVING, RETRY, ENDED }
 
     final int id;
     final List<UUID> members = new ArrayList<>();

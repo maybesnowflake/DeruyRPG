@@ -498,15 +498,13 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     }
 
     private void checkWipe(Run run) {
-        if (run.phase == Run.Phase.ENDED || run.phase == Run.Phase.FAILING) return; // RETRY 중에도 목숨 소진은 검사
+        if (run.phase == Run.Phase.ENDED) return; // RETRY 중에도 목숨 소진은 검사
         if (!run.aliveMembers().isEmpty()) return;
         if (!run.anyLivesLeft()) {
-            // 전원 소진: 즉시 진행 불가 상태로 (tick·클리어·투표 이동 모두 멈춤) → 3초 뒤 귀환
-            run.phase = Run.Phase.FAILING;
-            run.cancelRespawns();
+            // 전원 소진 → 3초 뒤 귀환. 그 사이 마지막 몹·보스가 쓰러지면(동시 처치) 클리어 인정 — 3초 뒤에도 전원 소진이면 실패
             broadcast(run, Component.text("전멸 — 남은 목숨이 없습니다", NamedTextColor.DARK_RED));
             Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                if (run.phase == Run.Phase.FAILING) end(run, false);
+                if (run.phase != Run.Phase.ENDED && run.aliveMembers().isEmpty() && !run.anyLivesLeft()) end(run, false);
             }, 60);
             return;
         }
