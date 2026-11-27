@@ -79,6 +79,7 @@ public final class TridentKit implements WeaponKit, Listener {
     private static final double COLUMN_HEIGHT = 8.0;
     private static final double COLUMN_DAMAGE = 4.0;
     private static final int COLUMN_TICKS = 30;
+    private static final double COLUMN_SEGMENT = 1.2;       // 물기둥 몸통 파티클 묶음 단위(칸)
 
     private static final int RIPTIDE_COOLDOWN = 6;          // 급류 0.3초
     private static final int RIPTIDE_LEVEL = 4;             // 급류 IV
@@ -362,7 +363,7 @@ public final class TridentKit implements WeaponKit, Listener {
             double allow = STREAM_WIDTH + le.getWidth() / 2;
             if (distSq > allow * allow) continue;
             if (Damage.skill(p, le, dmg)) {
-                le.setVelocity(le.getVelocity().add(dir.clone().setY(0).multiply(0.35)));
+                Targets.velocity(le, le.getVelocity().add(dir.clone().setY(0).multiply(0.35)));
                 splash(c.toLocation(w));
             }
         }
@@ -492,7 +493,7 @@ public final class TridentKit implements WeaponKit, Listener {
                             > (RIPTIDE_HIT_RADIUS + le.getWidth() / 2) * (RIPTIDE_HIT_RADIUS + le.getWidth() / 2) + 1) continue;
                     if (!hit.add(le.getUniqueId())) continue;
                     if (!Damage.skill(p, le, dmg)) continue;
-                    le.setVelocity(fwd.clone().setY(0).multiply(0.6).setY(0.35));
+                    Targets.velocity(le, fwd.clone().setY(0).multiply(0.6).setY(0.35));
                     splash(le.getLocation().add(0, le.getHeight() * 0.6, 0));
                     Fx.sound(le.getLocation(), Sound.ITEM_TRIDENT_HIT, 0.8f, 1.2f);
                 }
@@ -566,21 +567,26 @@ public final class TridentKit implements WeaponKit, Listener {
                 double core = radius * 0.45;
                 ThreadLocalRandom r = ThreadLocalRandom.current();
 
-                // 몸통: 거품 기둥 + 물보라
-                for (double y = 0; y <= h; y += 0.4) {
-                    Location l = base.clone().add(0, y, 0);
-                    w.spawnParticle(Particle.BUBBLE_COLUMN_UP, l, 6, core, 0.15, core, 0.08);
-                    w.spawnParticle(Particle.SPLASH, l, 4, core, 0.15, core, 0.08);
-                    if (r.nextInt(3) == 0) w.spawnParticle(Particle.BUBBLE_POP, l, 2, core, 0.1, core, 0.02);
+                // 몸통: 거품 기둥 + 물보라 — 1.2칸 구간마다 패킷 1개(count·y offset 으로 묶음).
+                // 예전(0.4칸마다 6+4개)과 같은 밀도: 구간당 18+12개.
+                for (double y = 0; y < h; y += COLUMN_SEGMENT) {
+                    double seg = Math.min(COLUMN_SEGMENT, h - y);
+                    double k = seg / 0.4;
+                    Location l = base.clone().add(0, y + seg / 2, 0);
+                    double oy = seg * 0.3;
+                    w.spawnParticle(Particle.BUBBLE_COLUMN_UP, l, (int) Math.ceil(6 * k), core, oy, core, 0.08);
+                    w.spawnParticle(Particle.SPLASH, l, (int) Math.ceil(4 * k), core, oy, core, 0.08);
+                    if (r.nextInt(2) == 0) w.spawnParticle(Particle.BUBBLE_POP, l, (int) Math.ceil(k), core, oy, core, 0.02);
                 }
-                // 물방울 소용돌이 (3줄 나선)
+                // 물방울 소용돌이 (3줄 나선) — 점 간격 0.55칸, 점마다 2개를 살짝 퍼뜨려 선을 유지
                 for (int arm = 0; arm < 3; arm++) {
-                    for (double y = 0; y <= h; y += 0.35) {
+                    int i = 0;
+                    for (double y = 0; y <= h; y += 0.55, i++) {
                         double ang = y * 1.3 + t * 0.45 + arm * (Math.PI * 2 / 3);
                         double rr = radius * (0.55 + 0.25 * Math.sin(y * 0.8 + t * 0.3));
                         Location l = base.clone().add(Math.cos(ang) * rr, y, Math.sin(ang) * rr);
-                        w.spawnParticle(Particle.SPLASH, l, 1, 0, 0, 0, 0);
-                        if (((int) (y * 10)) % 7 == 0) w.spawnParticle(Particle.DRIPPING_WATER, l, 1, 0, 0, 0, 0);
+                        w.spawnParticle(Particle.SPLASH, l, 2, 0.08, 0.12, 0.08, 0);
+                        if (i % 4 == arm) w.spawnParticle(Particle.DRIPPING_WATER, l, 1, 0, 0, 0, 0);
                     }
                 }
                 // 꼭대기 왕관 + 쏟아지는 물
@@ -606,13 +612,13 @@ public final class TridentKit implements WeaponKit, Listener {
                     if (dx * dx + dz * dz > radius * radius || dy < -1 || dy > h) continue;
                     if (hit.add(le.getUniqueId())) {
                         if (Damage.skill(p, le, dmg)) {
-                            lifted.add(le.getUniqueId());
-                            le.setVelocity(new Vector(0, lift, 0));
+                            // 넉백 면역(Targets.canMove false)이면 피해만, 띄우지 않음
+                            if (Targets.velocity(le, new Vector(0, lift, 0))) lifted.add(le.getUniqueId());
                             splash(l.clone().add(0, 0.5, 0));
                         }
                     } else if (lifted.contains(le.getUniqueId())
                             && t <= COLUMN_TICKS - 8 && le.getVelocity().getY() < 0.3) {
-                        le.setVelocity(le.getVelocity().setY(0.35));
+                        Targets.velocity(le, le.getVelocity().setY(0.35));
                     }
                 }
                 t += 2;
@@ -741,6 +747,28 @@ public final class TridentKit implements WeaponKit, Listener {
     public void onUnequip(Player player) {
         removeWaterSpeed(player);
         clearThrusts(player.getUniqueId());
+    }
+
+    /**
+     * /reload·서버 종료: 진행 중 급류 회전 자세(setRiptiding)를 풀고, 물속 공격 속도 modifier·뇌우·찌르기 연출을 정리.
+     * (태스크는 코어가 이후 전부 취소하지만 플레이어에 남는 상태는 여기서 되돌려야 함)
+     */
+    @Override
+    public void onPluginDisable() {
+        for (UUID id : Set.copyOf(riptides.keySet())) endRiptide(id, Bukkit.getPlayer(id));
+        for (UUID id : Set.copyOf(storms.keySet())) stopStorm(id);
+        for (UUID id : Set.copyOf(thrustDisplays.keySet())) clearThrusts(id);
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            // 우리 급류로 켠 자세만 풀면 되지만, 태스크가 이미 끝난 틈의 잔여 상태도 안전하게 해제
+            if (p.isRiptiding() && isTrident(p.getInventory().getItemInMainHand())) p.setRiptiding(false);
+            removeWaterSpeed(p); // transient modifier 는 리로드 후에도 남으므로 키로 제거
+        }
+        riptides.clear();
+        storms.clear();
+        waterSpeed.clear();
+        riptideReleaseTick.clear();
+        lastThrust.clear();
+        thrustDisplays.clear();
     }
 
     @EventHandler
