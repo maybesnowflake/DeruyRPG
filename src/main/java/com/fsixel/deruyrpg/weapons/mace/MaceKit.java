@@ -29,6 +29,7 @@ import org.bukkit.event.entity.EntityChangeBlockEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDropItemEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
@@ -74,7 +75,7 @@ public final class MaceKit implements WeaponKit, Listener {
     private static final int QUAKE_DIVE_TIMEOUT = 60;
     private static final int QUAKE_STUN = 10;             // 0.5초 기절
 
-    /** 도약 강타 착지 대기 중인 작업 (무기 해제 시 취소). */
+    /** 도약 강타 착지 대기 중인 작업 — 쿨다운을 치른 스킬이라 공중에서 무기를 바꿔도 유지 (사망·접속 종료 때만 정리). */
     private final Map<UUID, BukkitTask> landing = new ConcurrentHashMap<>();
     /** 궁극기(지진) 내리꽂기 착지 대기 — 무기 해제와 무관하게 끝까지 진행 (종료·사망·접속 종료 때만 정리). */
     private final Map<UUID, BukkitTask> quakeDive = new ConcurrentHashMap<>();
@@ -420,19 +421,46 @@ public final class MaceKit implements WeaponKit, Listener {
     }
 
     /**
-     * 무기 해제 (여러 번 불려도 안전). 도약 착지 대기·피버 돌풍만 정리.
-     * 궁극기(지진) 내리꽂기·파동은 끝까지 진행. 낙하 피해 무효는 시간 만료로 자연 정리 (공중에서 바꿔 들어도 보호).
+     * 무기 해제 (여러 번 불려도 안전). 피버 돌풍만 정리(착지 전이면 쿨다운 시작).
+     * 도약 강타 착지 판정·낙하 무효는 공중에서 바꿔 들어도 유지 → 착지하면 정상 처리 (쿨다운을 치른 스킬).
+     * 궁극기(지진) 내리꽂기·파동도 끝까지 진행.
      */
     @Override
     public void onUnequip(Player player) {
-        cancelLanding(landing, player.getUniqueId());
         finishGust(player);
+    }
+
+    /** 사망: 남은 상태 전부 정리. */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onDeath(PlayerDeathEvent e) {
+        clearAll(e.getEntity().getUniqueId());
     }
 
     /** 접속 종료: 남은 상태 전부 정리. */
     @EventHandler(priority = EventPriority.MONITOR)
     public void onQuit(PlayerQuitEvent e) {
-        UUID id = e.getPlayer().getUniqueId();
+        clearAll(e.getPlayer().getUniqueId());
+    }
+
+    /**
+     * 플러그인 종료: 착지 대기·낙하 무효가 남은 플레이어의 낙하 거리를 초기화(종료 직후 낙하 피해 완화)하고 상태 정리.
+     * 태스크는 이후 자동 취소됨.
+     */
+    @Override
+    public void onPluginDisable() {
+        Set<UUID> ids = new HashSet<>(noFallUntil.keySet());
+        ids.addAll(landing.keySet());
+        ids.addAll(quakeDive.keySet());
+        for (UUID id : ids) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null && p.isOnline()) p.setFallDistance(0);
+            clearAll(id);
+        }
+        for (UUID id : new HashSet<>(gustAirUses.keySet())) clearAll(id);
+        quakeBlocks.clear();
+    }
+
+    private void clearAll(UUID id) {
         cancelLanding(landing, id);
         cancelLanding(quakeDive, id);
         noFallUntil.remove(id);
