@@ -340,7 +340,7 @@ public final class RodKit implements WeaponKit, Listener {
         double dist = v.length();
         if (dist <= 1.5) return;
         v.setY(0).normalize().multiply(Math.min(2.2, 0.25 + dist * 0.13)).setY(0.3 + Math.min(0.25, dist * 0.02));
-        target.setVelocity(v);
+        Targets.velocity(target, v); // 넉백 면역 대상은 안 끌려옴
     }
 
     // ------------------------------------------------------------------ ⇧우 (범위)
@@ -499,12 +499,12 @@ public final class RodKit implements WeaponKit, Listener {
                             Vector v = center.toVector().subtract(e.getLocation().toVector()).setY(0);
                             double d = v.length();
                             if (d < 0.8) {
-                                e.setVelocity(new Vector(0, e.getVelocity().getY(), 0));
+                                Targets.velocity(e, new Vector(0, e.getVelocity().getY(), 0));
                                 continue;
                             }
                             // 접선 성분을 섞어 휘감기는 느낌
                             Vector tan = new Vector(-v.getZ(), 0, v.getX()).normalize().multiply(0.25);
-                            e.setVelocity(v.normalize().multiply(Math.min(1.2, 0.25 + d * 0.2)).add(tan).setY(0.12));
+                            Targets.velocity(e, v.normalize().multiply(Math.min(1.2, 0.25 + d * 0.2)).add(tan).setY(0.12)); // 넉백 면역이면 안 끌려옴
                         }
                     }
                     if (t % 4 == 0) Fx.sound(center, Sound.BLOCK_ENCHANTMENT_TABLE_USE, 1f, 0.6f + t * 0.06f);
@@ -659,6 +659,16 @@ public final class RodKit implements WeaponKit, Listener {
         lastRightTick.remove(id);
         if (boosted.remove(id)) DeruyRPG.get().mana().clearBoost(player);
         if (player.isDead()) cancelTasks(id);
+    }
+
+    /** 플러그인 종료: 남은 피버 마나 부스트 해제 (태스크는 이후 자동 취소됨). */
+    @Override
+    public void onPluginDisable() {
+        for (UUID id : new ArrayList<>(boosted)) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) DeruyRPG.get().mana().clearBoost(p);
+        }
+        boosted.clear();
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
