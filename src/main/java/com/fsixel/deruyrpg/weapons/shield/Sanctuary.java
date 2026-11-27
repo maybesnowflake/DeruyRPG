@@ -65,9 +65,17 @@ final class Sanctuary {
             PotionEffectType.LEVITATION, PotionEffectType.BLINDNESS, PotionEffectType.DARKNESS,
             PotionEffectType.NAUSEA, PotionEffectType.WEAKNESS, PotionEffectType.MINING_FATIGUE);
 
+    /** 투사체 추적 범위: 한 틱에 ~14칸까지 움직이는 투사체도 돔을 통과하기 전후로 한 번은 보이게. */
+    private static final double PROJECTILE_SCAN = RADIUS + 14;
+    /** 성역 구 파티클: 점 수 / 점마다 입자 수 / 퍼짐 (패킷 수 = 점 수). */
+    private static final int DOME_POINTS = 55;
+    private static final int DOME_POINT_COUNT = 2;
+    private static final double DOME_SPREAD = 0.18;
+
     private final UUID owner;
     private final Location center;
-    private final Map<UUID, Boolean> projectileInside = new HashMap<>();
+    /** 지난 틱에 본 투사체 위치 (이번 틱 이동 선분의 시작점). */
+    private Map<UUID, Vector> projectilePrev = new HashMap<>();
     private Map<UUID, Boolean> enemyInside = new HashMap<>();
     private final Map<UUID, Integer> enemyLastHit = new HashMap<>();
     private final List<ItemDisplay> shields = new ArrayList<>();
@@ -99,7 +107,7 @@ final class Sanctuary {
 
         Fx.sound(center, Sound.ITEM_SHIELD_BLOCK, 1f, 0.6f);
         Fx.sound(center, Sound.ENTITY_IRON_GOLEM_REPAIR, 1f, 0.8f);
-        Fx.sphere(center, Particle.END_ROD, RADIUS, 220);
+        domeParticles(DOME_POINTS * 2);
         spawnShields();
         repel(p);
         HudTask.flash(p, Component.text("성역 전개!", NamedTextColor.AQUA), 30);
@@ -115,8 +123,8 @@ final class Sanctuary {
         }
         spinShields();
         if (ticks % 4 == 0) {
-            Fx.sphere(center, Particle.END_ROD, RADIUS, 110);
-            Fx.ring(center, Particle.ENCHANT, RADIUS, 32);
+            domeParticles(DOME_POINTS);
+            ringParticles(16);
         }
         if (ticks % 5 == 0) clearCc(p);
         if (ticks % 10 == 0) {
@@ -152,38 +160,88 @@ final class Sanctuary {
         if (ticks % 40 == 0) enemyLastHit.values().removeIf(t -> ticks - t >= ENTRY_HIT_GAP);
     }
 
-    /** 돔 밖에서 안으로 들어오는 투사체 차단. */
+    /**
+     * 돔 밖에서 들어오는 투사체 차단. 지난 틱 위치 → 현재 위치 선분이 돔 구와 교차하면 진입으로 판정
+     * (한 틱에 돔을 통째로 가로지르는 고속 투사체 포함). 돔 안에서 쏜 것·아군 투사체는 통과.
+     */
     private void blockProjectiles(Player p) {
-        double r2 = RADIUS * RADIUS;
-        double scan = RADIUS + 5;
-        for (Entity en : center.getWorld().getNearbyEntities(center, scan, scan, scan)) {
-            if (!(en instanceof Projectile pr)) continue;
+        Map<UUID, Vector> now = new HashMap<>();
+        for (Entity en : center.getWorld().getNearbyEntities(center, PROJECTILE_SCAN, PROJECTILE_SCAN, PROJECTILE_SCAN)) {
+            if (!(en instanceof Projectile pr) || !pr.isValid()) continue;
             if (pr instanceof AbstractArrow a && a.isInBlock()) continue;
-            boolean inside = pr.getLocation().distanceSquared(center) <= r2;
-            Boolean was = projectileInside.put(pr.getUniqueId(), inside);
-            if (!inside) continue;
-            boolean entered = was != null
-                    ? !was
-                    : pr.getLocation().clone().subtract(pr.getVelocity()).distanceSquared(center) > r2;
-            if (!entered || isFriendly(p, pr)) continue;
-            deflect(pr);
+            Vector cur = pr.getLocation().toVector();
+            Vector start = segmentStart(pr, projectilePrev);
+            now.put(pr.getUniqueId(), cur);
+            if (start == null || isFriendly(p, pr)) continue;
+            Vector entry = entryPoint(start, cur);
+            if (entry == null) continue;
+            now.remove(pr.getUniqueId());
+            deflect(pr, entry);
         }
+        projectilePrev = now;
+    }
+
+    /** 이번 틱 이동 선분의 시작점. 돔 안에서 발사된 처음 보는 투사체는 null(차단 안 함). */
+    private Vector segmentStart(Projectile pr, Map<UUID, Vector> prev) {
+        Vector known = prev.get(pr.getUniqueId());
+        if (known != null) return known;
+        Location origin = pr.getOrigin();
+        if (origin != null && contains(origin)) return null;
+        return pr.getLocation().toVector().subtract(pr.getVelocity());
+    }
+
+    /** start 가 돔 밖이고 start→end 선분이 돔 구와 만나면 첫 교차점, 아니면 null. */
+    Vector entryPoint(Vector start, Vector end) {
+        Vector c = center.toVector();
+        double r2 = RADIUS * RADIUS;
+        Vector f = start.clone().subtract(c);
+        double cc = f.lengthSquared() - r2;
+        if (cc <= 0) return null; // 시작이 돔 안 → 진입 아님
+        Vector d = end.clone().subtract(start);
+        double a = d.lengthSquared();
+        if (a < 1e-9) return null;
+        double b = 2 * f.dot(d);
+        double disc = b * b - 4 * a * cc;
+        if (disc < 0) return null;
+        double t = (-b - Math.sqrt(disc)) / (2 * a);
+        if (t < 0 || t > 1) return null;
+        return start.clone().add(d.multiply(t));
+    }
+
+    /**
+     * 투사체가 엔티티에 맞을 때(같은 틱에 돔을 뚫고 맞히는 경우): 돔 밖에서 출발해 돔을 지나왔으면 차단.
+     * 지난 틱 위치(없으면 발사 지점/현재-속도) → 맞은 대상 중심 선분으로 판정.
+     */
+    boolean blockOnHit(Player p, Projectile pr, Entity hit) {
+        if (ended || isFriendly(p, pr) || !pr.getWorld().equals(center.getWorld())) return false;
+        Vector start = segmentStart(pr, projectilePrev);
+        if (start == null) return false;
+        Vector end = hit.getBoundingBox().getCenter();
+        Vector entry = entryPoint(start, end);
+        if (entry == null) return false;
+        projectilePrev.remove(pr.getUniqueId());
+        deflect(pr, entry);
+        return true;
     }
 
     boolean isFriendly(Player p, Projectile pr) {
         return pr.getShooter() instanceof Player sp && Targets.isAlly(p, sp);
     }
 
-    void deflect(Projectile pr) {
-        Location at = pr.getLocation();
+    /** 돔 표면(entry)에서 막힘 연출. 삼지창은 지우면 주인이 잃으므로 튕겨내고, 나머지는 제거. */
+    private void deflect(Projectile pr, Vector entry) {
+        Location at = entry.toLocation(center.getWorld());
         at.getWorld().spawnParticle(Particle.ENCHANTED_HIT, at, 12, 0.15, 0.15, 0.15, 0.1);
         Fx.sound(at, Sound.ITEM_SHIELD_BLOCK, 0.8f, 1.3f);
-        projectileInside.remove(pr.getUniqueId());
         if (pr instanceof Trident) {
-            // 삼지창은 지우면 주인이 잃으므로 튕겨냄
-            Vector out = at.toVector().subtract(center.toVector());
+            Vector out = entry.clone().subtract(center.toVector());
             if (out.lengthSquared() < 1e-6) out = new Vector(0, 1, 0);
-            pr.setVelocity(out.normalize().multiply(0.6).setY(0.3));
+            out.normalize();
+            Location back = entry.clone().add(out.clone().multiply(0.3)).toLocation(center.getWorld());
+            back.setYaw(pr.getLocation().getYaw());
+            back.setPitch(pr.getLocation().getPitch());
+            pr.teleport(back);
+            pr.setVelocity(out.multiply(0.6).setY(0.3));
         } else {
             pr.remove();
         }
@@ -220,10 +278,15 @@ final class Sanctuary {
     }
 
     void end() {
+        end(false);
+    }
+
+    /** @param stripBuffs true 면 시전자에게 건 성역 포션(저항 I·흡수 II·발광)도 즉시 제거 (플러그인 종료·리로드용). */
+    void end(boolean stripBuffs) {
         if (ended) return;
         ended = true;
         if (task != null) task.cancel();
-        projectileInside.clear();
+        projectilePrev.clear();
         enemyInside.clear();
         enemyLastHit.clear();
         for (ItemDisplay d : shields) if (d.isValid()) d.remove();
@@ -239,6 +302,12 @@ final class Sanctuary {
             removeModifier(p, Attribute.KNOCKBACK_RESISTANCE, KB_KEY);
             removeModifier(p, Attribute.EXPLOSION_KNOCKBACK_RESISTANCE, EXPLOSION_KB_KEY);
             removeModifier(p, Attribute.MOVEMENT_SPEED, SLOW_KEY);
+            if (stripBuffs) {
+                int left = DURATION - ticks + 2;
+                removeOwned(p, PotionEffectType.RESISTANCE, 0, left);
+                removeOwned(p, PotionEffectType.ABSORPTION, 1, left);
+                removeOwned(p, PotionEffectType.GLOWING, 0, left);
+            }
         }
         Fx.sound(center, Sound.BLOCK_BEACON_DEACTIVATE, 0.8f, 1.2f);
         onEnd.run();
@@ -305,6 +374,32 @@ final class Sanctuary {
         p.addPotionEffect(new PotionEffect(PotionEffectType.RESISTANCE, left, 0, false, true));
         p.addPotionEffect(new PotionEffect(PotionEffectType.ABSORPTION, left, 1, false, true));
         p.setAbsorptionAmount(Math.min(p.getAbsorptionAmount(), absorbCap));
+    }
+
+    /** 성역이 건 것으로 보이는 효과(같은 단계, 남은 시간 이하)만 제거. */
+    private static void removeOwned(Player p, PotionEffectType type, int amp, int maxLeft) {
+        PotionEffect cur = p.getPotionEffect(type);
+        if (cur != null && cur.getAmplifier() == amp && cur.getDuration() <= maxLeft) p.removePotionEffect(type);
+    }
+
+    /** 돔 구 파티클 — 점마다 입자 여러 개를 한 패킷으로 묶어 보냄. */
+    private void domeParticles(int points) {
+        double golden = Math.PI * (3 - Math.sqrt(5));
+        for (int i = 0; i < points; i++) {
+            double y = 1 - (i / (double) (points - 1)) * 2;
+            double r = Math.sqrt(1 - y * y);
+            double t = golden * i + ticks * 0.15; // 매번 조금씩 돌려 빈틈이 고정되지 않게
+            Location l = center.clone().add(Math.cos(t) * r * RADIUS, y * RADIUS, Math.sin(t) * r * RADIUS);
+            center.getWorld().spawnParticle(Particle.END_ROD, l, DOME_POINT_COUNT, DOME_SPREAD, DOME_SPREAD, DOME_SPREAD, 0);
+        }
+    }
+
+    private void ringParticles(int points) {
+        for (int i = 0; i < points; i++) {
+            double a = Math.PI * 2 * i / points;
+            Location l = center.clone().add(Math.cos(a) * RADIUS, 0.1, Math.sin(a) * RADIUS);
+            center.getWorld().spawnParticle(Particle.ENCHANT, l, 2, 0.2, 0, 0.2, 0);
+        }
     }
 
     private static void addSlow(Player p) {
