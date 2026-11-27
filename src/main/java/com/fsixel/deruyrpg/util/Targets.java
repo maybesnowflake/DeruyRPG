@@ -129,6 +129,7 @@ public final class Targets {
     /** 스킬로 적의 속도를 직접 바꿀 때 사용 — 넉백 면역(canMove false)이면 무시. 바뀌었으면 true. */
     public static boolean velocity(LivingEntity target, Vector v) {
         if (!canMove(target)) return false;
+        if (!Double.isFinite(v.getX()) || !Double.isFinite(v.getY()) || !Double.isFinite(v.getZ())) return false; // NaN 방어
         target.setVelocity(v);
         return true;
     }

@@ -339,7 +339,14 @@ public final class RodKit implements WeaponKit, Listener {
         Vector v = p.getLocation().toVector().subtract(target.getLocation().toVector());
         double dist = v.length();
         if (dist <= 1.5) return;
-        v.setY(0).normalize().multiply(Math.min(2.2, 0.25 + dist * 0.13)).setY(0.3 + Math.min(0.25, dist * 0.02));
+        Vector horiz = v.clone().setY(0);
+        double up = 0.3 + Math.min(0.25, dist * 0.02);
+        if (horiz.lengthSquared() < 1e-4) {
+            // 바로 위/아래에 있는 대상: 수평 성분 없이 높이만 맞춤 (영벡터 정규화 NaN 방지)
+            v = new Vector(0, Math.signum(v.getY()) * Math.min(1.2, 0.3 + dist * 0.1), 0);
+        } else {
+            v = horiz.normalize().multiply(Math.min(2.2, 0.25 + dist * 0.13)).setY(up);
+        }
         Targets.velocity(target, v); // 넉백 면역 대상은 안 끌려옴
     }
 
