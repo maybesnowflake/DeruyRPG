@@ -1,5 +1,6 @@
 package com.fsixel.deruyrpg;
 
+import com.fsixel.deruyrpg.boss.BossManager;
 import com.fsixel.deruyrpg.command.RpgCommand;
 import com.fsixel.deruyrpg.core.Cooldowns;
 import com.fsixel.deruyrpg.core.FeverManager;
@@ -30,6 +31,7 @@ public final class DeruyRPG extends JavaPlugin {
     private ManaManager mana;
     private TrainingDummy dummy;
     private HudTask hud;
+    private BossManager bosses;
 
     public static DeruyRPG get() {
         return instance;
@@ -61,6 +63,8 @@ public final class DeruyRPG extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new InputListener(this), this);
         dummy = new TrainingDummy(this);
         getServer().getPluginManager().registerEvents(dummy, this);
+        bosses = new BossManager(this);
+        getServer().getPluginManager().registerEvents(bosses, this);
         hud = new HudTask(this);
         hud.runTaskTimer(this, HudTask.PERIOD, HudTask.PERIOD);
 
@@ -79,6 +83,7 @@ public final class DeruyRPG extends JavaPlugin {
     public ManaManager mana() { return mana; }
     public TrainingDummy dummy() { return dummy; }
     public HudTask hud() { return hud; }
+    public BossManager bosses() { return bosses; }
 
     /** /reload·종료 시 정리: 무기 해제 처리, 기절 해제, 연출·소환 엔티티 제거. */
     @Override
@@ -99,6 +104,13 @@ public final class DeruyRPG extends JavaPlugin {
                 } catch (Throwable t) {
                     getLogger().warning("[" + k.id() + "] 종료 정리 오류: " + t);
                 }
+            }
+        }
+        if (bosses != null) {
+            try {
+                bosses.removeAll();
+            } catch (Throwable t) {
+                getLogger().warning("보스 정리 오류: " + t);
             }
         }
         com.fsixel.deruyrpg.util.Cc.unstunAll();

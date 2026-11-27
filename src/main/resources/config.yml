@@ -19,3 +19,26 @@ mana:
   regen-per-second: 0.05
 
 # 피버(궁극기 후) 기본 지속시간은 무기 코드 기본 15초
+
+# 던전 보스
+boss:
+  moss-warden:
+    # 1페이즈 최대 체력 (50%가 되면 각성 → 2페이즈 최대 체력으로 가득 채워 다시 시작)
+    health: 200.0
+    # 2페이즈 최대 체력 = health × 이 값
+    phase2-health-multiplier: 1.5
+    # 방어력 (바닐라 갑옷 수치, 0~30) — 평타·투사체·일반 스킬 피해 감소. 관통(워든 음파 등)·마법 피해는 방어력 무시
+    armor: 10.0
+    # 방어 강도 (0~20) — 철퇴 낙하 같은 큰 한 방이 방어력을 덜 뚫게 함
+    armor-toughness: 4.0
+    # 미니보스(/rpg boss spawn ... mini, 1페이즈 전용·각성 없음) 능력치 배율 — 체력·피해·방어력
+    mini-stat-multiplier: 0.75
+    # 보스가 주는 모든 피해 배율
+    damage-multiplier: 1.0
+    # 보스방 좌표 — 게임 안에서 /rpg boss setspawn 으로 저장 (보스는 저장한 사람이 바라보던 방향을 봄)
+    # spawn:
+    #   world: world
+    #   x: 0.5
+    #   y: 64.0
+    #   z: 0.5
+    #   yaw: 0.0
