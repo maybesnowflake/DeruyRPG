@@ -85,6 +85,8 @@ public final class MossWarden {
     private static final double P1_SPIN_DMG = 3;
     private static final int P1_SPIN_STUN = 20, P1_SPIN_GRACE = 35;
     private static final double P1_THORN_DMG = 6;
+    private static final int SPIKE_HIT_TICK = 3;
+    private static final double SPIKE_HIT_RADIUS = 0.8;
     private static final double P2_SLAM_DMG = 13, P2_SLAM_RADIUS = 3.0;
     private static final double P2_VINE_DMG = P2_SLAM_DMG * 0.4, P2_VINE_TOUCH = 2;
     private static final double P2_DART_DMG = 2.5;
@@ -510,7 +512,7 @@ public final class MossWarden {
 
         @Override
         boolean lockTurn(int t) {
-            return t > 10;
+            return t > 5;
         }
 
         @Override
@@ -524,12 +526,18 @@ public final class MossWarden {
             Vector3f fist = left ? m.fistL : m.fistR;
             Bone fore = left ? Bone.FORE_L : Bone.FORE_R;
             if (t == 1) sound(anchor, Sound.ENTITY_IRON_GOLEM_REPAIR, 0.8f, 1.6f);
-            if (t >= 11 && t < MossAnim.P1_SLAM_HIT) {
+            if (t >= 6 && t < MossAnim.P1_SLAM_HIT) {
                 // 내려칠 자리 예고 (회전이 잠긴 뒤 위치 고정)
                 if (impact == null) {
                     impact = ground(MossRig.toWorld(m, MossAnim.p1Slam(MossAnim.P1_SLAM_HIT, left), fore, fist, anchor, yaw));
                 }
-                if (t % 2 == 0) ringFx(impact, P1_SLAM_RADIUS, Color.fromRGB(0x9BD45A), 18);
+                // 실제 피해 범위(P1_SLAM_RADIUS) = 테두리 원, 안쪽도 채워서 "여기 맞는다"를 보여줌. 내려치기 직전엔 빨갛게
+                Color c = t >= MossAnim.P1_SLAM_HIT - 5 ? Color.fromRGB(0xE0533A) : Color.fromRGB(0x9BD45A);
+                ringFx(impact, P1_SLAM_RADIUS, c, 22);
+                if (t % 2 == 0) {
+                    world.spawnParticle(Particle.DUST, impact.clone().add(0, 0.1, 0), 10, P1_SLAM_RADIUS * 0.45, 0, P1_SLAM_RADIUS * 0.45,
+                            new Particle.DustOptions(c, 1.0f));
+                }
             }
             if (t == MossAnim.P1_SLAM_HIT) {
                 Location hit = impact != null ? impact : ground(rig.world(fore, fist));
@@ -594,6 +602,13 @@ public final class MossWarden {
                     if (p == null || !valid(p) || p.getLocation().distanceSquared(anchor) > 24 * 24) continue;
                     Cc.stun(p, P1_SPIN_STUN);
                     effects.add(new Pull(p, center, 8));
+                    p.sendActionBar(Component.text("끌려감 — 1초 기절", NamedTextColor.DARK_GREEN));
+                    Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                        if (!valid(p)) return;
+                        p.removePotionEffect(PotionEffectType.GLOWING);
+                        p.sendActionBar(Component.text("기절 해제 — 다음 공격 대비!", NamedTextColor.YELLOW));
+                        p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BELL, 1f, 1.6f);
+                    }, P1_SPIN_STUN);
                     sound(p.getLocation(), Sound.BLOCK_CAVE_VINES_PICK_BERRIES, 1.2f, 0.6f);
                 }
                 if (!hit.isEmpty()) {
@@ -643,7 +658,7 @@ public final class MossWarden {
             if (t == 1) sound(anchor, Sound.BLOCK_ROOTED_DIRT_PLACE, 1.5f, 0.6f);
             if (t == LOCK) {
                 Vector f = forward();
-                double[] angs = fan ? new double[]{-22, 0, 22} : new double[]{0};
+                double[] angs = fan ? new double[]{-25, 25} : new double[]{0}; // 두 갈래 사이 가운데가 안전 통로
                 for (double a : angs) {
                     Vector dir = f.clone().rotateAroundY(Math.toRadians(a));
                     List<Location> path = new ArrayList<>();
@@ -1196,6 +1211,9 @@ public final class MossWarden {
                 if (hurt(p, P1_SPIN_DMG)) {
                     hit.add(p.getUniqueId());
                     p.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 30, 0));
+                    p.addPotionEffect(new PotionEffect(PotionEffectType.GLOWING, 60, 0, false, false, false)); // 표식: 회전 끝나면 끌려감
+                    p.sendActionBar(Component.text("덩굴 표식! 회전이 끝나면 끌려갑니다", NamedTextColor.GREEN));
+                    sound(p.getLocation(), Sound.BLOCK_VINE_PLACE, 1.2f, 1.4f);
                     world.spawnParticle(Particle.BLOCK, p.getLocation().add(0, 1, 0), 10, 0.3, 0.4, 0.3, vine);
                 }
             }
@@ -1281,8 +1299,10 @@ public final class MossWarden {
                 world.spawnParticle(Particle.BLOCK, base.clone().add(0, 0.2, 0), 12, 0.3, 0.1, 0.3, Material.ROOTED_DIRT.createBlockData());
                 sound(base, Sound.BLOCK_SWEET_BERRY_BUSH_BREAK, 1.2f, 0.7f);
                 sound(base, Sound.ENCHANT_THORNS_HIT, 0.7f, 1.2f);
-                for (Player p : players(base, 1.6, 2.2)) {
-                    if (hdist(p.getLocation(), base) > 1.0 || hit.contains(p.getUniqueId())) continue;
+            }
+            if (t == SPIKE_HIT_TICK) { // 다 솟아오른 뒤(보간 3틱) 판정 — 예고판(1.1칸) 안 + 몸 절반 여유
+                for (Player p : players(base, SPIKE_HIT_RADIUS, 2.2)) {
+                    if (hit.contains(p.getUniqueId())) continue;
                     if (hurt(p, P1_THORN_DMG)) {
                         hit.add(p.getUniqueId());
                         p.addPotionEffect(new PotionEffect(PotionEffectType.POISON, 70, 0));
