@@ -24,6 +24,8 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityShootBowEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.entity.ProjectileHitEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataContainer;
@@ -187,7 +189,20 @@ public final class BowKit implements WeaponKit, Listener {
     @Override
     public void onUnequip(Player player) {
         // 여러 번 불려도 안전 (맵 제거만). 피버 발광 갱신 상태도 여기서 정리 → 다시 들면 onPassiveTick 이 재개.
-        UUID id = player.getUniqueId();
+        // 폭발 화살 남은 발수는 쿨다운을 치른 버프라 무기를 바꿔도 유지 → 사망·접속 종료 때만 정리.
+        lastGlow.remove(player.getUniqueId());
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onDeath(PlayerDeathEvent e) {
+        UUID id = e.getEntity().getUniqueId();
+        explosiveCharges.remove(id);
+        lastGlow.remove(id);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onQuit(PlayerQuitEvent e) {
+        UUID id = e.getPlayer().getUniqueId();
         explosiveCharges.remove(id);
         lastGlow.remove(id);
     }
@@ -347,7 +362,7 @@ public final class BowKit implements WeaponKit, Listener {
             p.getWorld().spawnParticle(Particle.SONIC_BOOM, point, 1, 0, 0, 0, 0);
             for (Entity e : p.getWorld().getNearbyEntities(point, SONIC_WIDTH, SONIC_WIDTH, SONIC_WIDTH)) {
                 if (e instanceof LivingEntity le && Targets.isEnemy(p, e) && hit.add(le)) {
-                    if (Damage.pierce(p, le, dmg)) le.setVelocity(kb);
+                    if (Damage.pierce(p, le, dmg)) Targets.velocity(le, kb); // 넉백 면역 대상은 안 움직임
                 }
             }
         }
