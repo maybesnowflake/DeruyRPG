@@ -30,6 +30,7 @@ import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.scheduler.BukkitTask;
@@ -71,6 +72,9 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     private int nextRunId = 1;
     private final BukkitTask task;
 
+    private DungeonMobs dmobs;
+    private DungeonContent content;
+
     public DungeonManager(DeruyRPG plugin) {
         this.plugin = plugin;
         this.mobKey = new NamespacedKey(plugin, "dungeon_run");
@@ -81,6 +85,10 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         this.dworld = new com.fsixel.deruyrpg.dungeon.gen.DungeonWorld(plugin);
         load();
         task = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, TICK, TICK);
+        this.dmobs = new DungeonMobs(plugin);
+        this.content = new DungeonContent(plugin, this);
+        plugin.getServer().getPluginManager().registerEvents(dmobs, plugin);
+        plugin.getServer().getPluginManager().registerEvents(content, plugin);
     }
 
     // ================================================================== 설정
@@ -189,6 +197,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         if (run.phase == Run.Phase.ENDED) return;
         run.phase = Run.Phase.ENDED;
         run.cancelRespawns();
+        content.cleanup(run);
         clearMobs(run);
         removeBoss(run);
         Location back = returnLoc != null ? returnLoc : Bukkit.getWorlds().getFirst().getSpawnLocation();
@@ -393,6 +402,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
             }
             run.stage = r.stage();
         }
+        content.cleanup(run);
         run.round = r;
         run.phase = Run.Phase.ROUND;
         run.wave = 0;
@@ -417,20 +427,29 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         }
         statusLine(run);
         switch (r.type()) {
-            case COMBAT, ELITE -> spawnWave(run);
+            case COMBAT -> {
+                // 전투 라운드 일부가 특별 이벤트로 (스테이지당 최대 1번, 재도전 때도 같은 결과)
+                Boolean ev = run.eventRounds.get(r.id());
+                if (ev == null) {
+                    ev = !run.eventStages.contains(r.stage()) && ThreadLocalRandom.current().nextDouble() < DungeonContent.EVENT_CHANCE;
+                    run.eventRounds.put(r.id(), ev);
+                    if (ev) run.eventStages.add(r.stage());
+                }
+                if (ev) content.startEvent(run);
+                else spawnWave(run);
+            }
+            case ELITE -> spawnWave(run);
             case MINIBOSS, BOSS -> {
                 Location at = r.bossSpawn() != null ? r.bossSpawn() : r.spawn();
                 run.boss = plugin.bosses().spawn(at, false, r.type() == RoundType.MINIBOSS);
             }
-            case REST -> {
-                for (UUID u : run.aliveMembers()) {
-                    Player p = Bukkit.getPlayer(u);
-                    if (p != null) heal(p);
-                }
-                hint(run, "휴식 — 체력 회복. 준비되면 /dg next");
+            case REST -> content.startRest(run);
+            case SHOP -> content.startShop(run);
+            case EVENT -> {
+                if (r.trigger() != null) hint(run, "장치를 작동시키세요");
+                else content.startEvent(run);
             }
-            case SHOP -> hint(run, "상점 (거래 창 준비 중) — 준비되면 /dg next");
-            case PUZZLE, EVENT -> hint(run, r.trigger() != null ? "장치를 작동시키세요" : "완료하면 /dg next");
+            case PUZZLE -> hint(run, r.trigger() != null ? "장치를 작동시키세요" : "완료하면 /dg next");
         }
     }
 
@@ -447,7 +466,22 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         double scale = 1 + SCALE_PER_PLAYER * (run.scaleCount - 1);
         for (String entry : r.waves().get(run.wave)) {
             String[] parts = entry.split(":");
-            EntityType type = Registry.ENTITY_TYPE.get(NamespacedKey.minecraft(parts[0].trim().toLowerCase(Locale.ROOT)));
+            String mobId = parts[0].trim().toLowerCase(Locale.ROOT);
+            if (DungeonMobs.has(mobId)) { // 커스텀 몹 (DungeonMobs)
+                int n = 1;
+                if (parts.length > 1) {
+                    try {
+                        n = Math.max(1, Integer.parseInt(parts[1].trim()));
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+                for (int i = 0; i < n; i++) {
+                    LivingEntity le = dmobs.spawn(mobId, spawnPoint(r));
+                    if (le != null) tagMob(run, le, scale);
+                }
+                continue;
+            }
+            EntityType type = Registry.ENTITY_TYPE.get(NamespacedKey.minecraft(mobId));
             int count = 1;
             if (parts.length > 1) {
                 try {
@@ -500,9 +534,18 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
 
     private void clearRound(Run run) {
         if (run.phase != Run.Phase.ROUND) return;
-        run.rewarded.add(run.round.id());
+        boolean first = run.rewarded.add(run.round.id());
         run.boss = null;
         RoundDef r = run.round;
+        // 엘리트·미니보스 클리어 보상 (재도전 때 재지급 X)
+        int bonus = !first ? 0 : r.type() == RoundType.MINIBOSS ? 10 : r.type() == RoundType.ELITE ? 3 : 0;
+        if (bonus > 0) {
+            for (UUID u : run.aliveMembers()) {
+                Player p = Bukkit.getPlayer(u);
+                if (p != null) DungeonContent.give(p, new ItemStack(Material.EMERALD, bonus));
+            }
+            hint(run, "클리어 보상: 에메랄드 " + bonus);
+        }
         if (r.last()) {
             String next = run.chapter.nextChapter();
             ChapterDef nc = next != null ? chapters.get(next) : null;
@@ -601,6 +644,14 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
             }
             if (run.phase != Run.Phase.ROUND) continue;
             RoundDef r = run.round;
+            content.relicTick(run, now);
+            if (run.event != null) { // 특별 이벤트 진행 중
+                if (content.eventTick(run)) {
+                    clearMobs(run);
+                    clearRound(run);
+                }
+                continue;
+            }
             if (r.type().combat()) {
                 run.mobs.removeIf(id -> Run.dead((LivingEntity) Bukkit.getEntity(id)));
                 if (run.mobs.isEmpty()) {
@@ -762,8 +813,12 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         if (id == null) return;
         Run run = runs.get(id);
         if (run != null) run.mobs.remove(e.getEntity().getUniqueId());
-        e.getDrops().clear(); // 보상은 라운드·상점 시스템에서
+        e.getDrops().clear(); // 보상은 에메랄드만 (상점 화폐)
         e.setDroppedExp(0);
+        // 특별 이벤트 중 추가 몹은 에메랄드 없음 (파밍 방지)
+        if (run != null && run.event == null) {
+            e.getDrops().add(new ItemStack(Material.EMERALD, content.emeraldsFor(run, dmobs.idOf(e.getEntity()))));
+        }
     }
 
     /** 던전 슬라임은 분열하지 않음 (자식이 웨이브 추적에서 빠지는 문제 방지). */
@@ -802,6 +857,45 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     }
 
     // ================================================================== 공개 API (상점 등)
+
+    /** 목숨을 더 살 수 있는지 (스테이지 2부터, buy-max-lives 미만). */
+    boolean canBuyLife(Player p) {
+        Run run = byPlayer.get(p.getUniqueId());
+        return run != null && run.stage > 1 && run.lives(p.getUniqueId()) < buyMaxLives;
+    }
+
+    @Nullable Run runOf(Player p) {
+        return byPlayer.get(p.getUniqueId());
+    }
+
+    void hintAll(Run run, String msg) {
+        hint(run, msg);
+    }
+
+    /** 이벤트 등에서 추가 몹 소환 (라운드 몹으로 추적 → 라운드 정리 때 제거). */
+    void spawnExtra(Run run, String id, int n) {
+        for (int i = 0; i < n; i++) {
+            Location at = spawnPoint(run.round);
+            LivingEntity le = DungeonMobs.has(id) ? dmobs.spawn(id, at) : null;
+            if (le == null) continue;
+            tagMob(run, le, 1);
+        }
+    }
+
+    private void tagMob(Run run, LivingEntity le, double scale) {
+        le.getPersistentDataContainer().set(mobKey, PersistentDataType.INTEGER, run.id);
+        le.setRemoveWhenFarAway(false);
+        AttributeInstance hp = le.getAttribute(Attribute.MAX_HEALTH);
+        if (hp != null && scale > 1) {
+            hp.setBaseValue(hp.getBaseValue() * scale);
+            le.setHealth(hp.getValue());
+        }
+        if (le instanceof Mob mob) {
+            Player target = nearestAlive(run, le.getLocation());
+            if (target != null) mob.setTarget(target);
+        }
+        run.mobs.add(le.getUniqueId());
+    }
 
     /** 목숨 구매: 최대 buy-max-lives 까지. 성공 여부. */
     public boolean buyLife(Player p) {

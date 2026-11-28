@@ -53,6 +53,21 @@ final class Run {
     boolean walkedIn;
     int slot = -1;
 
+    // ---- 콘텐츠 (DungeonContent)
+    /** 상인·정령·탐험가 NPC */
+    final List<UUID> npcs = new ArrayList<>();
+    @Nullable DungeonContent.EventState event;
+    /** 특별 이벤트로 바뀐 전투 라운드 (재도전 때도 같게), 이벤트가 나온 스테이지 */
+    final Map<String, Boolean> eventRounds = new HashMap<>();
+    final Set<Integer> eventStages = new HashSet<>();
+    /** 플레이어 → 유물 (1인 1개), 무기 id → 개조 */
+    final Map<UUID, String> relic = new HashMap<>();
+    final Map<UUID, Map<String, String>> mods = new HashMap<>();
+    final Set<String> restChosen = new HashSet<>();
+    final Map<UUID, Long> relicCd = new HashMap<>();
+    final Map<UUID, org.bukkit.Location> lastPos = new HashMap<>();
+    final Map<UUID, Integer> stillTicks = new HashMap<>();
+
     RoundDef def(String id) {
         RoundDef r = resolved.get(id);
         return r != null ? r : chapter.round(id);
