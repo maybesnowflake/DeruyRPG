@@ -21,6 +21,19 @@ buy-max-lives: 4        # 상점 구매로 늘릴 수 있는 최대치
 boss-respawn-seconds: 10
 room-cell: 64           # 방 한 칸 크기 (템플릿 가로·세로가 이보다 크면 건너뜀)
 
+# 밸런스 (/dg reload 로 반영, /dg stats 결과 보고 조정 — 목표: 챕터 15분, 보스 6분)
+balance:
+  mob-scale-per-player: 0.15    # 몹 체력: 1명 초과 인원당 +15%
+  boss-scale-per-player: 0.15   # 보스·미니보스 체력: 기준 인원에서 1명당 ±15% (최소 0.4배)
+  boss-base-players: 4          # 보스 체력 설정(boss.moss-warden.health)이 맞춰진 인원
+  event-chance: 0.15            # 전투 라운드 → 특별 이벤트 확률 (스테이지당 1번)
+  emerald-per-stage: 1          # 몹 처치 에메랄드 = 스테이지 번호 × 이 값 × 몹 배율
+  elite-clear-bonus: 3
+  miniboss-clear-bonus: 10
+  event-reward-per-stage: 4     # 탐험가 구조 보상 에메랄드 = 스테이지 × 이 값
+  relic-price: 15
+  prices: { apple: 6, heal: 4, arrows: 2, repair: 5, swift: 5, strength: 8, life: 20, life_black: 25 }
+
 chapters:
   jungle:
     name: "정글"

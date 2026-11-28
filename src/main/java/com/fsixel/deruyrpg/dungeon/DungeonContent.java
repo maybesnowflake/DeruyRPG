@@ -41,7 +41,6 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 final class DungeonContent implements Listener {
 
-    static final double EVENT_CHANCE = 0.15; // 전투 라운드가 특별 이벤트로 바뀔 확률 (스테이지당 최대 1번)
     private static final int EVENT_SECONDS = 30;
     private static final int RESCUE_TICKS = 60; // 탐험가 옆에서 웅크린 누적 시간
 
@@ -59,7 +58,7 @@ final class DungeonContent implements Listener {
 
     /** 몹 처치 에메랄드: 스테이지가 높을수록 많이, 엘리트형 몹은 배율. */
     int emeraldsFor(Run run, @Nullable String customId) {
-        int base = Math.max(1, run.stage);
+        int base = Math.max(1, run.stage) * dm.bal.emeraldPerStage;
         int mult = customId != null ? DungeonMobs.WORTH.getOrDefault(customId, 1) : 1;
         if (run.round != null && run.round.type() == RoundType.ELITE) mult = Math.max(mult, 2);
         return base * mult;
@@ -134,23 +133,26 @@ final class DungeonContent implements Listener {
     // ================================================================== 상점
 
     private enum Ware {
-        APPLE("황금 사과", Material.GOLDEN_APPLE, 6, 1),
-        HEAL("치유 물약 (투척)", Material.SPLASH_POTION, 4, 1),
-        ARROWS("화살 16개", Material.ARROW, 2, 1),
-        REPAIR("장비 수리", Material.ANVIL, 5, 1),
-        SWIFT("신속 물약", Material.POTION, 5, 1),
-        STRENGTH("힘 물약", Material.BLAZE_POWDER, 8, 2),
-        LIFE("목숨 +1 (최대 4)", Material.TOTEM_OF_UNDYING, 20, 2);
+        APPLE("황금 사과", Material.GOLDEN_APPLE, 1),
+        HEAL("치유 물약 (투척)", Material.SPLASH_POTION, 1),
+        ARROWS("화살 16개", Material.ARROW, 1),
+        REPAIR("장비 수리", Material.ANVIL, 1),
+        SWIFT("신속 물약", Material.POTION, 1),
+        STRENGTH("힘 물약", Material.BLAZE_POWDER, 2),
+        LIFE("목숨 +1 (최대 4)", Material.TOTEM_OF_UNDYING, 2);
 
         final String label;
         final Material icon;
-        final int price, minStage;
+        final int minStage;
 
-        Ware(String label, Material icon, int price, int minStage) {
+        Ware(String label, Material icon, int minStage) {
             this.label = label;
             this.icon = icon;
-            this.price = price;
             this.minStage = minStage;
+        }
+
+        String key() {
+            return name().toLowerCase(java.util.Locale.ROOT);
         }
     }
 
@@ -170,7 +172,6 @@ final class DungeonContent implements Listener {
         }
     }
 
-    private static final int RELIC_PRICE = 15;
 
     private static final class Gui implements InventoryHolder {
         final Run run;
@@ -204,17 +205,17 @@ final class DungeonContent implements Listener {
         int slot = 10;
         if (g.kind.equals("relic")) {
             for (Relic r : Relic.values()) {
-                g.inv.setItem(slot, icon(r.icon, r.label, RELIC_PRICE, r.desc, "1인 1개 (이번 판 동안)"));
+                g.inv.setItem(slot, icon(r.icon, r.label, dm.bal.relicPrice, r.desc, "1인 1개 (이번 판 동안)"));
                 g.slots.put(slot++, "relic:" + r.name());
             }
             if (run.stage >= 2) {
-                g.inv.setItem(slot, icon(Material.TOTEM_OF_UNDYING, "목숨 +1 (최대 4)", 25));
+                g.inv.setItem(slot, icon(Material.TOTEM_OF_UNDYING, "목숨 +1 (최대 4)", dm.bal.price("life_black")));
                 g.slots.put(slot, "ware:LIFE25");
             }
         } else {
             for (Ware w : Ware.values()) {
                 if (run.stage < w.minStage) continue;
-                g.inv.setItem(slot, icon(w.icon, w.label, w.price));
+                g.inv.setItem(slot, icon(w.icon, w.label, dm.bal.price(w.key())));
                 g.slots.put(slot++, "ware:" + w.name());
             }
         }
@@ -256,10 +257,10 @@ final class DungeonContent implements Listener {
             return;
         }
         if (what.startsWith("relic:")) buyRelic(p, g.run, Relic.valueOf(what.substring(6)));
-        else if (what.equals("ware:LIFE25")) buyWare(p, g.run, Ware.LIFE, 25);
+        else if (what.equals("ware:LIFE25")) buyWare(p, g.run, Ware.LIFE, dm.bal.price("life_black"));
         else {
             Ware w = Ware.valueOf(what.substring(5));
-            buyWare(p, g.run, w, w.price);
+            buyWare(p, g.run, w, dm.bal.price(w.key()));
         }
         p.getOpenInventory().getTopInventory().setItem(22, icon(Material.EMERALD, "내 에메랄드: " + count(p, Material.EMERALD), -1));
     }
@@ -343,7 +344,7 @@ final class DungeonContent implements Listener {
             p.sendActionBar(Component.text("유물은 1인 1개입니다 (보유: " + Relic.valueOf(run.relic.get(p.getUniqueId())).label + ")", NamedTextColor.RED));
             return;
         }
-        if (!pay(p, RELIC_PRICE)) return;
+        if (!pay(p, dm.bal.relicPrice)) return;
         run.relic.put(p.getUniqueId(), r.name());
         dm.hintAll(run, p.getName() + " — 유물 [" + r.label + "] 획득: " + r.desc);
     }
@@ -566,12 +567,12 @@ final class DungeonContent implements Listener {
 
     private boolean finishEvent(Run run, boolean saved) {
         if (saved) {
-            dm.hintAll(run, "탐험가 구조 성공! 보급품: 황금 사과 1 + 에메랄드 " + (4 * Math.max(1, run.stage)));
+            dm.hintAll(run, "탐험가 구조 성공! 보급품: 황금 사과 1 + 에메랄드 " + (dm.bal.eventRewardPerStage * Math.max(1, run.stage)));
             for (UUID u : run.aliveMembers()) {
                 Player p = Bukkit.getPlayer(u);
                 if (p == null) continue;
                 give(p, new ItemStack(Material.GOLDEN_APPLE));
-                give(p, new ItemStack(Material.EMERALD, 4 * Math.max(1, run.stage)));
+                give(p, new ItemStack(Material.EMERALD, dm.bal.eventRewardPerStage * Math.max(1, run.stage)));
             }
         } else {
             dm.hintAll(run, "탐험가를 구하지 못했습니다... 길은 계속됩니다");
