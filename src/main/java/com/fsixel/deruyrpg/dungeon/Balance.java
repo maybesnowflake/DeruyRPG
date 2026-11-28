@@ -25,7 +25,20 @@ final class Balance {
             "apple", 6, "heal", 4, "arrows", 2, "repair", 5, "swift", 5, "strength", 8,
             "life", 20, "life_black", 25));
 
+    /** 항상 기본값에서 시작 → 키·섹션을 지우고 reload 해도 재시작과 같은 결과. */
     void load(@Nullable ConfigurationSection b) {
+        Balance d = new Balance();
+        mobScalePerPlayer = d.mobScalePerPlayer;
+        bossScalePerPlayer = d.bossScalePerPlayer;
+        bossBasePlayers = d.bossBasePlayers;
+        eventChance = d.eventChance;
+        emeraldPerStage = d.emeraldPerStage;
+        eliteClearBonus = d.eliteClearBonus;
+        minibossClearBonus = d.minibossClearBonus;
+        eventRewardPerStage = d.eventRewardPerStage;
+        relicPrice = d.relicPrice;
+        prices.clear();
+        prices.putAll(d.prices);
         if (b == null) return;
         mobScalePerPlayer = Math.max(0, b.getDouble("mob-scale-per-player", mobScalePerPlayer));
         bossScalePerPlayer = Math.max(0, b.getDouble("boss-scale-per-player", bossScalePerPlayer));
