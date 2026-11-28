@@ -56,7 +56,14 @@ public final class BossManager implements Listener {
 
     /** mini = 1페이즈 전용 미니보스(능력치 × mini-stat-multiplier, 각성 없음). */
     public MossWarden spawn(Location loc, boolean phase2, boolean mini) {
-        MossWarden w = MossWarden.spawn(plugin, mini ? settings.mini() : settings, loc, phase2 && !mini);
+        return spawn(loc, phase2, mini, 1.0);
+    }
+
+    /** healthScale = 던전 인원 보정 (1.0 = 설정 그대로). */
+    public MossWarden spawn(Location loc, boolean phase2, boolean mini, double healthScale) {
+        BossSettings s = mini ? settings.mini() : settings;
+        if (healthScale != 1.0) s = s.scaledHealth(healthScale);
+        MossWarden w = MossWarden.spawn(plugin, s, loc, phase2 && !mini);
         wardens.add(w);
         return w;
     }

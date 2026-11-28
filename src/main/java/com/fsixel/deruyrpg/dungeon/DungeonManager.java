@@ -50,7 +50,8 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
 
     private static final int TICK = 10; // 0.5초마다 진행 검사
     private static final int VOTE_SECONDS = 20;
-    private static final double SCALE_PER_PLAYER = 0.15;
+    /** 밸런스 수치 (dungeon.yml balance:) */
+    final Balance bal = new Balance();
     private static final int CANYON_GAP = 40;   // 방 칸 사이 협곡 길이
     private static final int WALK_SECONDS = 90; // 걸어서 안 오면 이 시간 뒤 텔레포트
 
@@ -100,6 +101,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     public void load() {
         yml = YamlConfiguration.loadConfiguration(file);
         maxLives = Math.max(1, yml.getInt("max-lives", 3));
+        bal.load(yml.getConfigurationSection("balance"));
         cell = Math.max(16, yml.getInt("room-cell", 64));
         if (rooms != null) rooms.load(cell);
         buyMaxLives = Math.max(maxLives, yml.getInt("buy-max-lives", 4));
@@ -457,7 +459,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
                 // 전투 라운드 일부가 특별 이벤트로 (스테이지당 최대 1번, 재도전 때도 같은 결과)
                 Boolean ev = run.eventRounds.get(r.id());
                 if (ev == null) {
-                    ev = !run.eventStages.contains(r.stage()) && ThreadLocalRandom.current().nextDouble() < DungeonContent.EVENT_CHANCE;
+                    ev = !run.eventStages.contains(r.stage()) && ThreadLocalRandom.current().nextDouble() < bal.eventChance;
                     run.eventRounds.put(r.id(), ev);
                     if (ev) run.eventStages.add(r.stage());
                 }
@@ -467,7 +469,9 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
             case ELITE -> spawnWave(run);
             case MINIBOSS, BOSS -> {
                 Location at = r.bossSpawn() != null ? r.bossSpawn() : r.spawn();
-                run.boss = plugin.bosses().spawn(at, false, r.type() == RoundType.MINIBOSS);
+                // 인원 보정: 기준 인원(기본 4)에서 1명당 ±boss-scale-per-player, 최소 0.4배
+                double k = Math.max(0.4, 1 + bal.bossScalePerPlayer * (run.scaleCount - bal.bossBasePlayers));
+                run.boss = plugin.bosses().spawn(at, false, r.type() == RoundType.MINIBOSS, k);
             }
             case REST -> content.startRest(run);
             case SHOP -> content.startShop(run);
@@ -489,7 +493,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
             clearRound(run);
             return;
         }
-        double scale = 1 + SCALE_PER_PLAYER * (run.scaleCount - 1);
+        double scale = 1 + bal.mobScalePerPlayer * (run.scaleCount - 1);
         for (String entry : r.waves().get(run.wave)) {
             String[] parts = entry.split(":");
             String mobId = parts[0].trim().toLowerCase(Locale.ROOT);
@@ -565,7 +569,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         run.boss = null;
         RoundDef r = run.round;
         // 엘리트·미니보스 클리어 보상 (재도전 때 재지급 X)
-        int bonus = !first ? 0 : r.type() == RoundType.MINIBOSS ? 10 : r.type() == RoundType.ELITE ? 3 : 0;
+        int bonus = !first ? 0 : r.type() == RoundType.MINIBOSS ? bal.minibossClearBonus : r.type() == RoundType.ELITE ? bal.eliteClearBonus : 0;
         if (bonus > 0) {
             for (UUID u : run.aliveMembers()) {
                 Player p = Bukkit.getPlayer(u);

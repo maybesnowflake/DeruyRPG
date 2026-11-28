@@ -89,6 +89,8 @@ public final class MossWarden {
     private static final double SPIKE_HIT_RADIUS = 0.8;
     private static final double P2_SLAM_DMG = 13, P2_SLAM_RADIUS = 3.0;
     private static final double P2_VINE_DMG = P2_SLAM_DMG * 0.4, P2_VINE_TOUCH = 2;
+    /** 덩굴 분출 두 겹 링 반경 (덩굴 판정 1.15 → 안전 고리 약 4.2~6.4) */
+    private static final double VINE_RING_IN = 3.0, VINE_RING_OUT = 7.6;
     private static final double P2_DART_DMG = 2.5;
     private static final double STAGGER_TAKEN = 1.6;
     private static final int STAGGER_TICKS = 100;
@@ -923,11 +925,17 @@ public final class MossWarden {
             for (int k : kinds) {
                 switch (k) {
                     case 0 -> {
+                        // 뿌리 갑옷 두 겹 링: 안쪽 r=3.0(촘촘, 벽) · 바깥 r=7.6 — 사이 r≈4.2~6.4 가 안전 고리
                         double off = r.nextDouble(Math.PI * 2);
                         for (int i = 0; i < 8; i++) {
                             double a = off + i * Math.PI / 4;
-                            out.add(anchor.clone().add(Math.cos(a) * 4.8, 0, Math.sin(a) * 4.8));
+                            out.add(anchor.clone().add(Math.cos(a) * VINE_RING_IN, 0, Math.sin(a) * VINE_RING_IN));
                         }
+                        for (int i = 0; i < 14; i++) {
+                            double a = off + i * Math.PI * 2 / 14;
+                            out.add(anchor.clone().add(Math.cos(a) * VINE_RING_OUT, 0, Math.sin(a) * VINE_RING_OUT));
+                        }
+                        ringFx(ground(anchor.clone()), (VINE_RING_IN + VINE_RING_OUT) / 2, Color.fromRGB(0xD8F5A2), 28); // 안전 고리 표시
                     }
                     case 1 -> {
                         for (Player p : ps) out.add(p.getLocation());
@@ -944,7 +952,7 @@ public final class MossWarden {
                     }
                 }
             }
-            while (out.size() > 10) out.remove(out.size() - 1);
+            while (out.size() > 26) out.remove(out.size() - 1); // 두 겹 링(22) + 추가 패턴 일부
             List<Location> g = new ArrayList<>();
             for (Location l : out) g.add(ground(l));
             return g;

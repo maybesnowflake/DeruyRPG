@@ -47,6 +47,20 @@ public final class BossSettings {
     }
 
     /** 미니보스용 복사본: 체력·피해·방어력 × miniStatMultiplier. */
+    /** 체력만 k배 한 복사본 (던전 인원 보정). 1페이즈 체력 기준 → 2페이즈도 같은 비율로 따라감. */
+    public BossSettings scaledHealth(double k) {
+        BossSettings m = new BossSettings();
+        m.health = health * k;
+        m.armor = armor;
+        m.armorToughness = armorToughness;
+        m.damageMultiplier = damageMultiplier;
+        m.phase2HealthMultiplier = phase2HealthMultiplier;
+        m.miniStatMultiplier = miniStatMultiplier;
+        m.mini = mini;
+        m.spawn = spawn;
+        return m;
+    }
+
     public BossSettings mini() {
         BossSettings m = new BossSettings();
         double k = miniStatMultiplier;
