@@ -194,6 +194,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         runs.put(run.id, run);
         run.startedAt = System.currentTimeMillis();
         run.startSize = run.members.size();
+        for (Player p : players) run.startNames.add(p.getName());
         run.chapter = c;
         run.stage = c.round(c.start()).stage();
         broadcast(run, Component.text("[던전] " + c.name() + " 챕터 시작 — 목숨 " + maxLives + "개", NamedTextColor.GOLD));
@@ -208,9 +209,8 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         content.cleanup(run);
         clearMobs(run);
         removeBoss(run);
-        List<String> names = new ArrayList<>();
-        for (UUID u : run.members) names.add(String.valueOf(Bukkit.getOfflinePlayer(u).getName()));
-        runLog.write(run, cleared ? "clear" : stopping ? "stop" : "fail", names);
+        accrueBoss(run);
+        runLog.write(run, cleared ? "clear" : stopping ? "stop" : "fail", run.startNames);
         Location back = returnLoc != null ? returnLoc : Bukkit.getWorlds().getFirst().getSpawnLocation();
         for (UUID u : run.members) {
             byPlayer.remove(u);
@@ -227,6 +227,14 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     }
 
     private boolean stopping;
+
+    /** 보스·미니보스 라운드 시도 시간 누적 (클리어·재도전·종료 모두). 한 시도는 한 번만. */
+    private void accrueBoss(Run run) {
+        if (run.round != null && run.round.type().boss() && run.roundStartedAt > 0) {
+            run.roundSeconds.merge(run.round.type().name(), (System.currentTimeMillis() - run.roundStartedAt) / 1000, Long::sum);
+        }
+        run.roundStartedAt = 0;
+    }
 
     public void stopAll() {
         stopping = true;
@@ -418,6 +426,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         }
         content.cleanup(run);
         if (run.path.isEmpty() || !run.path.getLast().equals(r.id())) run.path.add(r.id());
+        accrueBoss(run); // 재도전 포함, 이전 보스 시도 시간 누적
         run.roundStartedAt = System.currentTimeMillis();
         run.round = r;
         run.phase = Run.Phase.ROUND;
@@ -550,7 +559,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
 
     private void clearRound(Run run) {
         if (run.phase != Run.Phase.ROUND) return;
-        if (run.round.type().boss()) run.roundSeconds.merge(run.round.type().name(), (System.currentTimeMillis() - run.roundStartedAt) / 1000, Long::sum);
+        accrueBoss(run);
         boolean first = run.rewarded.add(run.round.id());
         run.boss = null;
         RoundDef r = run.round;

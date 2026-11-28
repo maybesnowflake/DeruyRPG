@@ -461,7 +461,8 @@ final class DungeonContent implements Listener {
         return null;
     }
 
-    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    /** NORMAL: 보스 체력 임계값 보정(BossManager, HIGH)보다 먼저 증폭해야 50% 클램프·사망 처리가 유지됨. */
+    @EventHandler(priority = EventPriority.NORMAL, ignoreCancelled = true)
     public void onDeal(EntityDamageByEntityEvent e) {
         if (Damage.isProbe() || e.getEntity() instanceof Player || !(e.getEntity() instanceof LivingEntity target)) return;
         Player p = attacker(e);

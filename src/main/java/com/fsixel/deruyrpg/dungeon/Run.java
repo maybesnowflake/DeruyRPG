@@ -56,6 +56,7 @@ final class Run {
     // ---- 판 기록 (RunLog)
     long startedAt = System.currentTimeMillis();
     int startSize;
+    final List<String> startNames = new ArrayList<>();
     int deaths;
     long roundStartedAt;
     final List<String> path = new ArrayList<>();
