@@ -174,7 +174,8 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
 
     // ================================================================== 시작·종료
 
-    public @Nullable String start(String chapterId, Collection<Player> players) {
+    public @Nullable String start(String chapterId, Collection<Player> playersIn) {
+        Collection<Player> players = new LinkedHashSet<>(playersIn); // 같은 이름 중복 입력 방지
         ChapterDef c = chapters.get(chapterId);
         if (c == null) return "챕터 없음: " + chapterId;
         List<String> miss = missing(c);
@@ -740,7 +741,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
 
     private void down(Run run, Player p) {
         UUID u = p.getUniqueId();
-        if (run.down.contains(u)) return;
+        if (run.down.contains(u) || run.round == null) return; // 생성 중(/kill 등)엔 라운드가 아직 없음
         int left = Math.max(0, run.lives(u) - 1);
         run.lives.put(u, left);
         run.deaths++;
