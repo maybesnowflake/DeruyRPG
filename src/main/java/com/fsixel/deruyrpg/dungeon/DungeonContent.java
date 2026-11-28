@@ -481,11 +481,17 @@ final class DungeonContent implements Listener {
             target.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, 30, 1));
             target.getWorld().spawnParticle(Particle.BLOCK, target.getLocation().add(0, 0.3, 0), 8, 0.3, 0.1, 0.3, Material.VINE.createBlockData());
         }
-        if ("LEECH".equals(mod)) {
-            AttributeInstance hp = p.getAttribute(Attribute.MAX_HEALTH);
-            double max = hp != null ? hp.getValue() : 20;
-            p.setHealth(Math.min(max, p.getHealth() + e.getFinalDamage() * 0.08));
-        }
+    }
+
+    /** 흡혈은 모든 보정(보스 클램프 등)이 끝난 최종 피해 기준. */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onLeech(EntityDamageByEntityEvent e) {
+        if (Damage.isProbe() || e.getEntity() instanceof Player || !(e.getEntity() instanceof LivingEntity)) return;
+        Player p = attacker(e);
+        if (p == null || !"LEECH".equals(modOf(p))) return;
+        AttributeInstance hp = p.getAttribute(Attribute.MAX_HEALTH);
+        double max = hp != null ? hp.getValue() : 20;
+        p.setHealth(Math.min(max, p.getHealth() + e.getFinalDamage() * 0.08));
     }
 
     /** GUARD 개조는 던전 매니저의 치명타 판정(HIGHEST)보다 먼저 적용. */
