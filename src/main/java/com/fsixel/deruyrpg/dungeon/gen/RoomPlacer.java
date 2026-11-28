@@ -52,6 +52,8 @@ public final class RoomPlacer {
     }
 
     private final Deque<Job> jobs = new ArrayDeque<>();
+    /** 판 종료 정리 — jobs 가 쓰고 남은 예산으로만 실행 */
+    private final Deque<Job> clears = new ArrayDeque<>();
     private final BukkitTask task;
     private final Plugin plugin;
 
@@ -61,14 +63,19 @@ public final class RoomPlacer {
     }
 
     private void tick() {
-        int budget = BUDGET;
-        while (budget > 0 && !jobs.isEmpty()) {
-            Job j = jobs.peekFirst();
+        // 배치·작업 먼저, 정리는 남은 예산만 (끝난 판 정리가 새 판 생성을 막지 않게)
+        drain(clears, drain(jobs, BUDGET));
+    }
+
+    private static int drain(Deque<Job> q, int budget) {
+        while (budget > 0 && !q.isEmpty()) {
+            Job j = q.peekFirst();
             int before = budget;
             budget = j.run(budget);
-            if (j.done()) jobs.pollFirst();
+            if (j.done()) q.pollFirst();
             else if (budget == before) break; // 청크 로딩 대기 중
         }
+        return budget;
     }
 
     /**
@@ -114,6 +121,7 @@ public final class RoomPlacer {
         task.cancel();
         // 남은 작업은 버림 (던전 월드는 다음 시작 때 통째로 초기화)
         jobs.clear();
+        clears.clear();
     }
 
     /** 방 배치 예약. 다 놓이면 done 실행. */
@@ -193,7 +201,7 @@ public final class RoomPlacer {
         World w = origin.getWorld();
         int sx = size.getBlockX(), sy = size.getBlockY(), sz = size.getBlockZ();
         long total = (long) sx * sy * sz;
-        jobs.add(loaded(origin, size, new Job() {
+        clears.add(loaded(origin, size, new Job() {
             long i;
             boolean finished;
 
