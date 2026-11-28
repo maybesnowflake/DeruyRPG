@@ -73,11 +73,14 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     private final BukkitTask task;
 
     private DungeonMobs dmobs;
+    private RunLog runLog;
+    private final NamespacedKey modeKey;
     private DungeonContent content;
 
     public DungeonManager(DeruyRPG plugin) {
         this.plugin = plugin;
         this.mobKey = new NamespacedKey(plugin, "dungeon_run");
+        this.modeKey = new NamespacedKey(plugin, "dungeon_mode");
         this.file = new File(plugin.getDataFolder(), "dungeon.yml");
         if (!file.exists()) plugin.saveResource("dungeon.yml", false);
         this.rooms = new com.fsixel.deruyrpg.dungeon.gen.RoomLibrary(new File(plugin.getDataFolder(), "rooms"), plugin.getLogger());
@@ -86,6 +89,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         load();
         task = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, TICK, TICK);
         this.dmobs = new DungeonMobs(plugin);
+        this.runLog = new RunLog(plugin.getDataFolder());
         this.content = new DungeonContent(plugin, this);
         plugin.getServer().getPluginManager().registerEvents(dmobs, plugin);
         plugin.getServer().getPluginManager().registerEvents(content, plugin);
@@ -183,9 +187,13 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
             run.members.add(u);
             run.lives.put(u, maxLives);
             run.originalMode.put(u, p.getGameMode());
+            // 서버가 꺼져도 다음 접속 때 게임모드 복구 (onJoin)
+            p.getPersistentDataContainer().set(modeKey, PersistentDataType.STRING, p.getGameMode().name());
             byPlayer.put(u, run);
         }
         runs.put(run.id, run);
+        run.startedAt = System.currentTimeMillis();
+        run.startSize = run.members.size();
         run.chapter = c;
         run.stage = c.round(c.start()).stage();
         broadcast(run, Component.text("[던전] " + c.name() + " 챕터 시작 — 목숨 " + maxLives + "개", NamedTextColor.GOLD));
@@ -200,6 +208,9 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         content.cleanup(run);
         clearMobs(run);
         removeBoss(run);
+        List<String> names = new ArrayList<>();
+        for (UUID u : run.members) names.add(String.valueOf(Bukkit.getOfflinePlayer(u).getName()));
+        runLog.write(run, cleared ? "clear" : stopping ? "stop" : "fail", names);
         Location back = returnLoc != null ? returnLoc : Bukkit.getWorlds().getFirst().getSpawnLocation();
         for (UUID u : run.members) {
             byPlayer.remove(u);
@@ -215,7 +226,10 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         freeZone(run);
     }
 
+    private boolean stopping;
+
     public void stopAll() {
+        stopping = true;
         for (Run r : new ArrayList<>(runs.values())) end(r, false);
         task.cancel();
         placer.shutdown();
@@ -403,6 +417,8 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
             run.stage = r.stage();
         }
         content.cleanup(run);
+        if (run.path.isEmpty() || !run.path.getLast().equals(r.id())) run.path.add(r.id());
+        run.roundStartedAt = System.currentTimeMillis();
         run.round = r;
         run.phase = Run.Phase.ROUND;
         run.wave = 0;
@@ -534,6 +550,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
 
     private void clearRound(Run run) {
         if (run.phase != Run.Phase.ROUND) return;
+        if (run.round.type().boss()) run.roundSeconds.merge(run.round.type().name(), (System.currentTimeMillis() - run.roundStartedAt) / 1000, Long::sum);
         boolean first = run.rewarded.add(run.round.id());
         run.boss = null;
         RoundDef r = run.round;
@@ -717,6 +734,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         if (run.down.contains(u)) return;
         int left = Math.max(0, run.lives(u) - 1);
         run.lives.put(u, left);
+        run.deaths++;
         run.down.add(u);
         p.setGameMode(GameMode.SPECTATOR);
         for (PotionEffect pe : p.getActivePotionEffects()) p.removePotionEffect(pe.getType());
@@ -785,9 +803,28 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     }
 
     private void restore(Run run, Player p) {
+        p.getPersistentDataContainer().remove(modeKey);
         GameMode gm = run.originalMode.getOrDefault(p.getUniqueId(), GameMode.SURVIVAL);
         p.setGameMode(gm);
         if (gm != GameMode.SPECTATOR) heal(p);
+    }
+
+    /** 서버가 판 도중 꺼졌던 경우: 다음 접속 때 원래 게임모드·귀환 지점으로 복구. */
+    @EventHandler
+    public void onJoin(org.bukkit.event.player.PlayerJoinEvent e) {
+        Player p = e.getPlayer();
+        String mode = p.getPersistentDataContainer().get(modeKey, PersistentDataType.STRING);
+        if (mode == null || byPlayer.containsKey(p.getUniqueId())) return;
+        p.getPersistentDataContainer().remove(modeKey);
+        GameMode gm;
+        try {
+            gm = GameMode.valueOf(mode);
+        } catch (IllegalArgumentException ex) {
+            gm = GameMode.SURVIVAL;
+        }
+        p.setGameMode(gm);
+        p.teleport(returnLoc != null ? returnLoc : Bukkit.getWorlds().getFirst().getSpawnLocation());
+        p.sendMessage(Component.text("[던전] 이전 판이 중단돼 원래 상태로 복구했습니다", NamedTextColor.YELLOW));
     }
 
     @EventHandler
@@ -935,7 +972,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
     @Override
     public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, @NotNull String[] args) {
         if (args.length == 0) {
-            sender.sendMessage(Component.text("/dg status · vote <라운드> · next · leave  |  관리: start <챕터> [플레이어...] · stop · set <챕터> <라운드> <spawn|point|trigger|boss-spawn|clearpoints> · setreturn · reload · rooms · lives <플레이어> <n>", NamedTextColor.YELLOW));
+            sender.sendMessage(Component.text("/dg status · vote <라운드> · next · leave  |  관리: start <챕터> [플레이어...] · stop · set <챕터> <라운드> <spawn|point|trigger|boss-spawn|clearpoints> · setreturn · reload · rooms · lives <플레이어> <n> · list · stats [판수] · kick <플레이어> · tp <플레이어>", NamedTextColor.YELLOW));
             return true;
         }
         boolean admin = sender.hasPermission("deruyrpg.admin");
@@ -1038,6 +1075,42 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
                 else if (args.length >= 2 && args[1].equalsIgnoreCase("all")) for (Run r : new ArrayList<>(runs.values())) end(r, false);
             }
             case "rooms" -> sender.sendMessage(Component.text("방 템플릿: " + rooms.counts() + " (셀 " + cell + "칸, plugins/DeruyRPG/rooms/<풀>/*.nbt)", NamedTextColor.GREEN));
+            case "list" -> {
+                if (runs.isEmpty()) sender.sendMessage(Component.text("진행 중인 던전 없음", NamedTextColor.GRAY));
+                for (Run r : runs.values()) {
+                    StringBuilder sb = new StringBuilder("#" + r.id + " " + r.chapter.name() + " · ");
+                    sb.append(r.round != null ? r.round.name() + "(" + r.round.type().label + ")" : "생성 중").append(" · ").append(r.phase)
+                            .append(" · ").append((System.currentTimeMillis() - r.startedAt) / 60000).append("분 · ");
+                    for (UUID u : r.members) {
+                        sb.append(Bukkit.getOfflinePlayer(u).getName()).append('(').append(r.lives(u)).append(r.down.contains(u) ? ",관전" : "").append(") ");
+                    }
+                    sender.sendMessage(Component.text(sb.toString().trim(), NamedTextColor.GREEN));
+                }
+            }
+            case "stats" -> {
+                int n = 20;
+                if (args.length >= 2) {
+                    try {
+                        n = Math.max(1, Integer.parseInt(args[1]));
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+                for (String line : runLog.summary(n)) sender.sendMessage(Component.text(line, NamedTextColor.AQUA));
+            }
+            case "kick" -> {
+                Player o = args.length >= 2 ? Bukkit.getPlayerExact(args[1]) : null;
+                if (o == null || !byPlayer.containsKey(o.getUniqueId())) {
+                    sender.sendMessage(Component.text("/dg kick <던전 중인 플레이어>", NamedTextColor.RED));
+                    return;
+                }
+                onQuitLike(o);
+                sender.sendMessage(Component.text(o.getName() + " 던전에서 내보냄", NamedTextColor.GREEN));
+            }
+            case "tp" -> {
+                Player o = args.length >= 2 ? Bukkit.getPlayerExact(args[1]) : null;
+                if (self == null || o == null) return;
+                self.teleport(o.getLocation());
+            }
             case "reload" -> {
                 load();
                 sender.sendMessage(Component.text("dungeon.yml 다시 읽음 — 챕터 " + chapters.size() + "개", NamedTextColor.GREEN));
@@ -1106,7 +1179,7 @@ public final class DungeonManager implements Listener, CommandExecutor, TabCompl
         boolean admin = sender.hasPermission("deruyrpg.admin");
         if (args.length == 1) {
             out.addAll(List.of("status", "vote", "next", "leave"));
-            if (admin) out.addAll(List.of("start", "stop", "set", "setreturn", "reload", "lives", "rooms"));
+            if (admin) out.addAll(List.of("start", "stop", "set", "setreturn", "reload", "lives", "rooms", "list", "stats", "kick", "tp"));
         } else if (args.length == 2 && (args[0].equalsIgnoreCase("start") || args[0].equalsIgnoreCase("set"))) {
             out.addAll(chapters.keySet());
         } else if (args.length == 2 && args[0].equalsIgnoreCase("vote") && sender instanceof Player p) {

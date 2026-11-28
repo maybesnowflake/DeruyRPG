@@ -53,6 +53,15 @@ final class Run {
     boolean walkedIn;
     int slot = -1;
 
+    // ---- 판 기록 (RunLog)
+    long startedAt = System.currentTimeMillis();
+    int startSize;
+    int deaths;
+    long roundStartedAt;
+    final List<String> path = new ArrayList<>();
+    /** 라운드 종류(BOSS/MINIBOSS) → 클리어까지 걸린 초 */
+    final Map<String, Long> roundSeconds = new HashMap<>();
+
     // ---- 콘텐츠 (DungeonContent)
     /** 상인·정령·탐험가 NPC */
     final List<UUID> npcs = new ArrayList<>();
