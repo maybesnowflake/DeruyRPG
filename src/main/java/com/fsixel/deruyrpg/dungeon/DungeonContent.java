@@ -69,9 +69,11 @@ final class DungeonContent implements Listener {
         for (ItemStack left : p.getInventory().addItem(it).values()) p.getWorld().dropItem(p.getLocation(), left);
     }
 
+    /** 일반 아이템(이름·메타 없는 것)만, 저장 칸에서 — removeItem 이 차감하는 조건과 동일. */
     static int count(Player p, Material m) {
+        ItemStack plain = new ItemStack(m);
         int n = 0;
-        for (ItemStack it : p.getInventory().getContents()) if (it != null && it.getType() == m) n += it.getAmount();
+        for (ItemStack it : p.getInventory().getStorageContents()) if (it != null && it.isSimilar(plain)) n += it.getAmount();
         return n;
     }
 
@@ -268,7 +270,14 @@ final class DungeonContent implements Listener {
             p.playSound(p.getLocation(), Sound.ENTITY_VILLAGER_NO, 1f, 1f);
             return false;
         }
-        p.getInventory().removeItem(new ItemStack(Material.EMERALD, price));
+        var left = p.getInventory().removeItem(new ItemStack(Material.EMERALD, price));
+        if (!left.isEmpty()) { // 전액 차감 못 함 → 되돌리고 실패
+            int missing = 0;
+            for (ItemStack it : left.values()) missing += it.getAmount();
+            if (price - missing > 0) give(p, new ItemStack(Material.EMERALD, price - missing));
+            p.sendActionBar(Component.text("결제 실패 — 일반 에메랄드가 부족합니다", NamedTextColor.RED));
+            return false;
+        }
         p.playSound(p.getLocation(), Sound.ENTITY_VILLAGER_YES, 1f, 1f);
         return true;
     }

@@ -222,10 +222,10 @@ final class DungeonMobs implements Listener {
         }
     }
 
-    /** 예고(소리+입자) 후 실행. 예고 중엔 멈춤. */
+    /** 예고(소리+입자) 후 실행. 예고 중엔 멈춤 (구속 효과 — 청크가 언로드돼도 시간이 지나면 자연 해제). */
     private void windup(Mob m, Sound sound, Particle particle, int ticks, Runnable then) {
         m.getWorld().playSound(m.getLocation(), sound, 1.2f, 0.8f);
-        m.setAI(false);
+        m.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS, ticks, 10, false, false));
         new org.bukkit.scheduler.BukkitRunnable() {
             int t;
 
@@ -240,7 +240,6 @@ final class DungeonMobs implements Listener {
                 }
                 if (++t >= ticks) {
                     cancel();
-                    m.setAI(true);
                     then.run();
                 }
             }
